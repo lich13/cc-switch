@@ -10,6 +10,7 @@ import {
   useAutoFailoverEnabled,
   useSetAutoFailoverEnabled,
 } from "@/lib/query/failover";
+import { useProxyRoutingMode } from "@/lib/query/proxy";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -26,10 +27,13 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
     useAutoFailoverEnabled(activeApp);
   const setEnabled = useSetAutoFailoverEnabled();
   const { takeoverStatus } = useProxyStatus();
+  const { data: routingMode } = useProxyRoutingMode(activeApp);
   const takeoverEnabled = takeoverStatus?.[activeApp] ?? false;
+  const routeActive =
+    takeoverEnabled || (activeApp === "codex" && routingMode === "local_only");
 
   const handleToggle = (checked: boolean) => {
-    if (checked && !takeoverEnabled) return;
+    if (checked && !routeActive) return;
     setEnabled.mutate({ appType: activeApp, enabled: checked });
   };
 
@@ -40,7 +44,7 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
         ? "Codex"
         : "Gemini";
 
-  const tooltipText = !takeoverEnabled
+  const tooltipText = !routeActive
     ? t("failover.tooltip.takeoverRequired", {
         app: appLabel,
         defaultValue: `请先接管 ${appLabel}，再启用故障转移`,
@@ -78,7 +82,7 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
       <Switch
         checked={isEnabled}
         onCheckedChange={handleToggle}
-        disabled={setEnabled.isPending || isLoading || !takeoverEnabled}
+        disabled={setEnabled.isPending || isLoading || !routeActive}
       />
     </div>
   );

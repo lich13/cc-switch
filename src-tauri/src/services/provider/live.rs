@@ -15,6 +15,7 @@ use crate::config::{delete_file, get_claude_settings_path, read_json_file, write
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::proxy::types::ProxyRoutingMode;
 use crate::services::mcp::McpService;
 use crate::store::AppState;
 
@@ -913,6 +914,16 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     // Sync providers based on mode
     for app_type in AppType::all() {
+        if matches!(app_type, AppType::Codex) {
+            let routing_mode =
+                futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                    .unwrap_or(ProxyRoutingMode::Off);
+            if routing_mode == ProxyRoutingMode::LocalOnly {
+                log::info!("Codex pure local route is active; skipping Codex live sync");
+                continue;
+            }
+        }
+
         if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)?;

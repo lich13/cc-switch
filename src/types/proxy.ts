@@ -41,6 +41,16 @@ export interface ProxyServerInfo {
   started_at: string;
 }
 
+export type ProxyRoutingMode = "off" | "file_takeover" | "local_only";
+
+export interface CodexLocalRouteInfo {
+  enabled: boolean;
+  baseUrl: string;
+  launchCommand: string;
+  activeProviderId: string | null;
+  activeProviderName: string | null;
+}
+
 export interface ProxyTakeoverStatus {
   claude: boolean;
   "claude-desktop"?: boolean;
@@ -127,6 +137,7 @@ export interface GlobalProxyConfig {
 export interface AppProxyConfig {
   appType: string;
   enabled: boolean;
+  routingMode: ProxyRoutingMode;
   autoFailoverEnabled: boolean;
   maxRetries: number;
   streamingFirstByteTimeout: number;

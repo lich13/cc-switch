@@ -36,6 +36,7 @@ pub(crate) use live::{
 };
 
 // Internal re-exports
+use crate::proxy::types::ProxyRoutingMode;
 use live::{
     remove_hermes_provider_from_live, remove_openclaw_provider_from_live,
     remove_opencode_provider_from_live, write_gemini_live,
@@ -962,6 +963,13 @@ base_url = "http://localhost:8080"
 }
 
 impl ProviderService {
+    fn is_codex_local_only_active(state: &AppState, app_type: &AppType) -> bool {
+        matches!(app_type, AppType::Codex)
+            && futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                .map(|mode| mode == ProxyRoutingMode::LocalOnly)
+                .unwrap_or(false)
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -1066,6 +1074,9 @@ impl ProviderService {
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
+            if Self::is_codex_local_only_active(state, &app_type) {
+                return Ok(true);
+            }
             write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
         }
 
@@ -1229,6 +1240,10 @@ impl ProviderService {
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
         if is_current {
+            if Self::is_codex_local_only_active(state, &app_type) {
+                return Ok(true);
+            }
+
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
             // - 不直接走普通 Live 写入逻辑
             // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
@@ -1431,6 +1446,17 @@ impl ProviderService {
             return Self::switch_normal(state, app_type, id, &providers);
         }
 
+        if matches!(app_type, AppType::Codex) {
+            let routing_mode =
+                futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                    .unwrap_or(ProxyRoutingMode::Off);
+            if routing_mode == ProxyRoutingMode::LocalOnly {
+                futures::executor::block_on(state.proxy_service.hot_switch_provider("codex", id))
+                    .map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
+                return Ok(SwitchResult::default());
+            }
+        }
+
         // Check if proxy takeover mode is active AND proxy server is actually running
         // Both conditions must be true to use hot-switch mode
         // Use blocking wait since this is a sync function
@@ -1627,6 +1653,17 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<(), AppError> {
+        if matches!(app_type, AppType::Codex) {
+            let routing_mode =
+                futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                    .unwrap_or(ProxyRoutingMode::Off);
+            if routing_mode == ProxyRoutingMode::LocalOnly {
+                return Err(AppError::Message(
+                    "Codex pure routing is active; refusing to write Codex live config".to_string(),
+                ));
+            }
+        }
+
         if app_type.is_additive_mode() {
             return sync_current_provider_for_app_to_live(state, &app_type);
         }

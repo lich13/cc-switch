@@ -2,7 +2,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";
+import type {
+  GlobalProxyConfig,
+  AppProxyConfig,
+  ProxyRoutingMode,
+} from "@/types/proxy";
 
 // ========== 代理服务器状态 Hooks ==========
 
@@ -46,6 +50,23 @@ export function useProxyTakeoverStatus() {
   return useQuery({
     queryKey: ["proxyTakeoverStatus"],
     queryFn: () => proxyApi.getProxyTakeoverStatus(),
+    refetchInterval: 2000,
+  });
+}
+
+export function useProxyRoutingMode(appType: string) {
+  return useQuery({
+    queryKey: ["proxyRoutingMode", appType],
+    queryFn: () => proxyApi.getProxyRoutingModeForApp(appType),
+    enabled: !!appType,
+    refetchInterval: 2000,
+  });
+}
+
+export function useCodexLocalRouteInfo() {
+  return useQuery({
+    queryKey: ["codexLocalRouteInfo"],
+    queryFn: () => proxyApi.getCodexLocalRouteInfo(),
     refetchInterval: 2000,
   });
 }
@@ -98,6 +119,38 @@ export function useSetProxyTakeoverForApp() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] });
       queryClient.invalidateQueries({ queryKey: ["liveTakeoverActive"] });
+    },
+  });
+}
+
+export function useSetProxyRoutingModeForApp() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: ({
+      appType,
+      mode,
+    }: {
+      appType: string;
+      mode: ProxyRoutingMode;
+    }) => proxyApi.setProxyRoutingModeForApp(appType, mode),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["proxyRoutingMode", variables.appType],
+      });
+      queryClient.invalidateQueries({ queryKey: ["codexLocalRouteInfo"] });
+      queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["proxyRunning"] });
+      queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.codexRoute.toggleFailed", {
+          detail: error.message,
+          defaultValue: `Codex pure route toggle failed: ${error.message}`,
+        }),
+      );
     },
   });
 }

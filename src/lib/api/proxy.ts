@@ -6,6 +6,8 @@ import type {
   ProxyTakeoverStatus,
   GlobalProxyConfig,
   AppProxyConfig,
+  ProxyRoutingMode,
+  CodexLocalRouteInfo,
 } from "@/types/proxy";
 
 export const proxyApi = {
@@ -57,6 +59,21 @@ export const proxyApi = {
     enabled: boolean,
   ): Promise<void> {
     return invoke("set_proxy_takeover_for_app", { appType, enabled });
+  },
+
+  async getProxyRoutingModeForApp(appType: string): Promise<ProxyRoutingMode> {
+    return invoke("get_proxy_routing_mode_for_app", { appType });
+  },
+
+  async setProxyRoutingModeForApp(
+    appType: string,
+    mode: ProxyRoutingMode,
+  ): Promise<void> {
+    return invoke("set_proxy_routing_mode_for_app", { appType, mode });
+  },
+
+  async getCodexLocalRouteInfo(): Promise<CodexLocalRouteInfo> {
+    return invoke("get_codex_local_route_info");
   },
 
   // ========== Legacy 代理配置 API (兼容) ==========

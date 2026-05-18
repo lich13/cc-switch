@@ -335,8 +335,30 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_proxy_takeover_status`, () =>
     success({
       claude: false,
+      "claude-desktop": false,
       codex: false,
       gemini: false,
+      opencode: false,
+      openclaw: false,
+      hermes: false,
+    }),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_proxy_routing_mode_for_app`, () =>
+    success("off"),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/set_proxy_routing_mode_for_app`, () =>
+    success(true),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_codex_local_route_info`, () =>
+    success({
+      enabled: false,
+      baseUrl: "http://127.0.0.1:15721/v1",
+      launchCommand: "OPENAI_BASE_URL=http://127.0.0.1:15721/v1 codex",
+      activeProviderId: null,
+      activeProviderName: null,
     }),
   ),
 

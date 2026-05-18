@@ -66,6 +66,7 @@ import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
+import { CodexRoutingControls } from "@/components/proxy/CodexRoutingControls";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
@@ -1281,6 +1282,13 @@ function App() {
                 >
                   {activeApp === "claude-desktop" ? (
                     <ClaudeDesktopRouteToggle />
+                  ) : activeApp === "codex" ? (
+                    <>
+                      <CodexRoutingControls />
+                      {settingsData?.enableLocalProxy && (
+                        <ProxyToggle activeApp={activeApp} />
+                      )}
+                    </>
                   ) : (
                     settingsData?.enableLocalProxy && (
                       <ProxyToggle activeApp={activeApp} />
