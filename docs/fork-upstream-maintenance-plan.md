@@ -29,7 +29,7 @@ Verified on this workspace:
 - Current remote `origin`: `https://github.com/lich13/cc-switch.git`.
 - Current remote `upstream`: `https://github.com/farion1231/cc-switch.git`.
 - `upstream` push URL is disabled.
-- `main` is fast-forwarded to upstream `ed33990b` (`fix-codex-mise-detection (#2822)`).
+- Implementation branch includes upstream `0fb7fd12` (`feat: add Xiaomi MiMo Token Plan presets (#2803)`) merged from `farion1231/cc-switch@main`.
 - Official latest release checked during implementation: `v3.15.0`, published `2026-05-16T03:42:43Z`.
 - Existing CI: `.github/workflows/ci.yml`.
 - Existing release workflow: `.github/workflows/release.yml`.
