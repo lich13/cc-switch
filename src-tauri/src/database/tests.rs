@@ -286,9 +286,108 @@ fn schema_create_tables_include_pricing_model_columns() {
         Some("response")
     );
 
+    let routing_mode = get_column_info(&conn, "proxy_config", "routing_mode");
+    assert_eq!(routing_mode.r#type, "TEXT");
+    assert_eq!(routing_mode.notnull, 1);
+    assert_eq!(
+        normalize_default(&routing_mode.default).as_deref(),
+        Some("off")
+    );
+
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+}
+
+#[test]
+fn schema_create_tables_include_proxy_routing_mode() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    let routing_mode = get_column_info(&conn, "proxy_config", "routing_mode");
+    assert_eq!(routing_mode.r#type, "TEXT");
+    assert_eq!(routing_mode.notnull, 1);
+    assert_eq!(
+        normalize_default(&routing_mode.default).as_deref(),
+        Some("off")
+    );
+
+    let codex_mode: String = conn
+        .query_row(
+            "SELECT routing_mode FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read codex routing mode");
+    assert_eq!(codex_mode, "off");
+}
+
+#[test]
+fn schema_migration_maps_existing_proxy_enabled_to_file_takeover() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_config (
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+            streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+            non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+            circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+            circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+            circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+            circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO proxy_config (app_type, enabled) VALUES ('claude', 0);
+        INSERT INTO proxy_config (app_type, enabled) VALUES ('codex', 1);
+        INSERT INTO proxy_config (app_type, enabled) VALUES ('gemini', 0);
+        CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY, model TEXT NOT NULL);
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL DEFAULT '{}',
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        "#,
+    )
+    .expect("seed schema");
+
+    Database::set_user_version(&conn, 4).expect("set user_version=4");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let codex_mode: String = conn
+        .query_row(
+            "SELECT routing_mode FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read codex routing mode");
+    let claude_mode: String = conn
+        .query_row(
+            "SELECT routing_mode FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read claude routing mode");
+
+    assert_eq!(codex_mode, "file_takeover");
+    assert_eq!(claude_mode, "off");
 }
 
 #[test]

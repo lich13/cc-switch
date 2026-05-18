@@ -211,6 +211,62 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_proxy_routing_mode_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<ProxyRoutingMode, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT routing_mode FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get::<_, String>(0),
+            )
+        };
+
+        match result {
+            Ok(value) => ProxyRoutingMode::from_db(value.trim()).ok_or_else(|| {
+                AppError::Database(format!(
+                    "Invalid proxy routing_mode for {app_type}: {value}"
+                ))
+            }),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.init_proxy_config_rows().await?;
+                Ok(ProxyRoutingMode::Off)
+            }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    pub async fn set_proxy_routing_mode_for_app(
+        &self,
+        app_type: &str,
+        mode: ProxyRoutingMode,
+    ) -> Result<(), AppError> {
+        self.ensure_proxy_config_row_exists(app_type)?;
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE proxy_config SET routing_mode = ?2, updated_at = datetime('now') WHERE app_type = ?1",
+            rusqlite::params![app_type, mode.as_str()],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn is_any_proxy_route_active(&self) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_config
+                 WHERE enabled = 1 OR routing_mode IN ('file_takeover', 'local_only')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(count > 0)
+    }
+
     /// 获取应用级代理配置
     pub async fn get_proxy_config_for_app(
         &self,
@@ -221,7 +277,7 @@ impl Database {
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
-                "SELECT app_type, enabled, auto_failover_enabled,
+                "SELECT app_type, enabled, routing_mode, auto_failover_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                         circuit_error_rate_threshold, circuit_min_requests
@@ -231,16 +287,18 @@ impl Database {
                     Ok(AppProxyConfig {
                         app_type: row.get(0)?,
                         enabled: row.get::<_, i32>(1)? != 0,
-                        auto_failover_enabled: row.get::<_, i32>(2)? != 0,
-                        max_retries: row.get::<_, i32>(3)? as u32,
-                        streaming_first_byte_timeout: row.get::<_, i32>(4)? as u32,
-                        streaming_idle_timeout: row.get::<_, i32>(5)? as u32,
-                        non_streaming_timeout: row.get::<_, i32>(6)? as u32,
-                        circuit_failure_threshold: row.get::<_, i32>(7)? as u32,
-                        circuit_success_threshold: row.get::<_, i32>(8)? as u32,
-                        circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
-                        circuit_error_rate_threshold: row.get(10)?,
-                        circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                        routing_mode: ProxyRoutingMode::from_db(row.get::<_, String>(2)?.trim())
+                            .unwrap_or_default(),
+                        auto_failover_enabled: row.get::<_, i32>(3)? != 0,
+                        max_retries: row.get::<_, i32>(4)? as u32,
+                        streaming_first_byte_timeout: row.get::<_, i32>(5)? as u32,
+                        streaming_idle_timeout: row.get::<_, i32>(6)? as u32,
+                        non_streaming_timeout: row.get::<_, i32>(7)? as u32,
+                        circuit_failure_threshold: row.get::<_, i32>(8)? as u32,
+                        circuit_success_threshold: row.get::<_, i32>(9)? as u32,
+                        circuit_timeout_seconds: row.get::<_, i32>(10)? as u32,
+                        circuit_error_rate_threshold: row.get(11)?,
+                        circuit_min_requests: row.get::<_, i32>(12)? as u32,
                     })
                 },
             )
@@ -255,6 +313,7 @@ impl Database {
                 Ok(AppProxyConfig {
                     app_type: app_type_owned,
                     enabled: false,
+                    routing_mode: ProxyRoutingMode::Off,
                     auto_failover_enabled: false,
                     max_retries: 3,
                     streaming_first_byte_timeout: 60,
@@ -281,21 +340,23 @@ impl Database {
         conn.execute(
             "UPDATE proxy_config SET
                 enabled = ?2,
-                auto_failover_enabled = ?3,
-                max_retries = ?4,
-                streaming_first_byte_timeout = ?5,
-                streaming_idle_timeout = ?6,
-                non_streaming_timeout = ?7,
-                circuit_failure_threshold = ?8,
-                circuit_success_threshold = ?9,
-                circuit_timeout_seconds = ?10,
-                circuit_error_rate_threshold = ?11,
-                circuit_min_requests = ?12,
+                routing_mode = ?3,
+                auto_failover_enabled = ?4,
+                max_retries = ?5,
+                streaming_first_byte_timeout = ?6,
+                streaming_idle_timeout = ?7,
+                non_streaming_timeout = ?8,
+                circuit_failure_threshold = ?9,
+                circuit_success_threshold = ?10,
+                circuit_timeout_seconds = ?11,
+                circuit_error_rate_threshold = ?12,
+                circuit_min_requests = ?13,
                 updated_at = datetime('now')
              WHERE app_type = ?1",
             rusqlite::params![
                 config.app_type,
                 if config.enabled { 1 } else { 0 },
+                config.routing_mode.as_str(),
                 if config.auto_failover_enabled { 1 } else { 0 },
                 config.max_retries as i32,
                 config.streaming_first_byte_timeout as i32,

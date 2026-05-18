@@ -51,6 +51,7 @@ pub use mcp::{
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use proxy::types::{CodexLocalRouteInfo, ProxyRoutingMode};
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
@@ -954,7 +955,10 @@ pub fn run() {
                     }
                 };
                 // 检查 Live 配置是否仍处于被接管状态（包含占位符）
-                let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
+                let live_taken_over = state
+                    .proxy_service
+                    .detect_recoverable_takeover_in_live_configs()
+                    .await;
 
                 if has_backups || live_taken_over {
                     log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
@@ -1251,6 +1255,9 @@ pub fn run() {
             commands::stop_proxy_with_restore,
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
+            commands::get_proxy_routing_mode_for_app,
+            commands::set_proxy_routing_mode_for_app,
+            commands::get_codex_local_route_info,
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
@@ -1546,7 +1553,9 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
                 false
             }
         };
-        let live_taken_over = proxy_service.detect_takeover_in_live_configs();
+        let live_taken_over = proxy_service
+            .detect_recoverable_takeover_in_live_configs()
+            .await;
         let needs_restore = has_backups || live_taken_over;
 
         if needs_restore {
@@ -1582,20 +1591,25 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
     // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
     let mut apps_to_restore = Vec::new();
+    let mut local_only_routes = Vec::new();
     for app_type in ["claude", "codex", "gemini"] {
         if let Ok(config) = state.db.get_proxy_config_for_app(app_type).await {
             if config.enabled {
                 apps_to_restore.push(app_type);
+            } else if app_type == "codex" && config.routing_mode == ProxyRoutingMode::LocalOnly {
+                local_only_routes.push(app_type);
             }
         }
     }
 
-    if apps_to_restore.is_empty() {
+    if apps_to_restore.is_empty() && local_only_routes.is_empty() {
         log::debug!("启动时无需恢复代理状态");
         return;
     }
 
-    log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
+    log::info!(
+        "检测到上次代理状态需要恢复，接管应用: {apps_to_restore:?}, 纯路由应用: {local_only_routes:?}"
+    );
 
     // 逐个恢复接管状态
     for app_type in apps_to_restore {
@@ -1616,6 +1630,28 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
                     .await
                 {
                     log::error!("清除 {app_type} 代理状态失败: {clear_err}");
+                }
+            }
+        }
+    }
+
+    for app_type in local_only_routes {
+        match state
+            .proxy_service
+            .set_routing_mode_for_app(app_type, ProxyRoutingMode::LocalOnly)
+            .await
+        {
+            Ok(()) => {
+                log::info!("✓ 已恢复 {app_type} 的纯本地路由状态");
+            }
+            Err(e) => {
+                log::error!("✗ 恢复 {app_type} 的纯本地路由状态失败: {e}");
+                if let Err(clear_err) = state
+                    .db
+                    .set_proxy_routing_mode_for_app(app_type, ProxyRoutingMode::Off)
+                    .await
+                {
+                    log::error!("清除 {app_type} 纯路由状态失败: {clear_err}");
                 }
             }
         }

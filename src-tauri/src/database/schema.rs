@@ -125,7 +125,8 @@ impl Database {
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
             listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
-            enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 0, routing_mode TEXT NOT NULL DEFAULT 'off',
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
@@ -310,6 +311,15 @@ impl Database {
             "ALTER TABLE proxy_config ADD COLUMN enable_logging INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE proxy_config ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'off'",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE proxy_config SET routing_mode = CASE WHEN enabled = 1 THEN 'file_takeover' ELSE 'off' END
+             WHERE routing_mode = 'off'",
+            [],
+        );
 
         // 尝试添加超时配置列到 proxy_config 表
         let _ = conn.execute(
@@ -430,6 +440,11 @@ impl Database {
                         log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
+                    }
+                    10 => {
+                        log::info!("迁移数据库从 v10 到 v11（添加代理路由模式）");
+                        Self::migrate_v10_to_v11(conn)?;
+                        Self::set_user_version(conn, 11)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -562,6 +577,14 @@ impl Database {
                 "enable_logging",
                 "INTEGER NOT NULL DEFAULT 1",
             )?;
+            if Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "routing_mode",
+                "TEXT NOT NULL DEFAULT 'off'",
+            )? {
+                Self::backfill_proxy_routing_mode(conn)?;
+            }
 
             Self::add_column_if_missing(
                 conn,
@@ -751,7 +774,8 @@ impl Database {
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
             listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
-            enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 0, routing_mode TEXT NOT NULL DEFAULT 'off',
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
@@ -766,10 +790,11 @@ impl Database {
         for (app, takeover, failover, retries, fb, idle, cb_f, cb_s, cb_t, cb_r, cb_m) in apps {
             conn.execute(
                 "INSERT INTO proxy_config_new (app_type, proxy_enabled, listen_address, listen_port, enable_logging,
-                 enabled, auto_failover_enabled, max_retries, streaming_first_byte_timeout, streaming_idle_timeout,
+                 enabled, routing_mode, auto_failover_enabled, max_retries, streaming_first_byte_timeout, streaming_idle_timeout,
                  non_streaming_timeout, circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                  circuit_error_rate_threshold, circuit_min_requests)
-                 VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 VALUES (?1, 0, ?2, ?3, ?4, ?5, CASE WHEN ?5 = 1 THEN 'file_takeover' ELSE 'off' END,
+                         ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![app, old_config.0, old_config.1, old_config.3,
                     if takeover { 1 } else { 0 }, if failover { 1 } else { 0 },
                     retries, fb, idle, old_config.6, cb_f, cb_s, cb_t, cb_r, cb_m]
@@ -1197,6 +1222,37 @@ impl Database {
         }
 
         log::info!("v9 -> v10 迁移完成：已添加 Hermes Agent 支持");
+        Ok(())
+    }
+
+    /// v10 -> v11 迁移：添加代理路由模式
+    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_config")?
+            && Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "routing_mode",
+                "TEXT NOT NULL DEFAULT 'off'",
+            )?
+        {
+            Self::backfill_proxy_routing_mode(conn)?;
+        }
+
+        log::info!("v10 -> v11 迁移完成：已添加代理路由模式");
+        Ok(())
+    }
+
+    fn backfill_proxy_routing_mode(conn: &Connection) -> Result<(), AppError> {
+        if !Self::has_column(conn, "proxy_config", "enabled")? {
+            return Ok(());
+        }
+
+        conn.execute(
+            "UPDATE proxy_config
+             SET routing_mode = CASE WHEN enabled = 1 THEN 'file_takeover' ELSE 'off' END",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("迁移 proxy_config.routing_mode 失败: {e}")))?;
         Ok(())
     }
 
