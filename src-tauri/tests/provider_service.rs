@@ -341,6 +341,111 @@ requires_openai_auth = true
 }
 
 #[test]
+fn proxy_service_failover_codex_local_only_switches_internal_target_only() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let sentinel_auth = json!({ "OPENAI_API_KEY": "do-not-touch-failover" });
+    let sentinel_config = r#"model_provider = "sentinel"
+[model_providers.sentinel]
+base_url = "https://sentinel.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&sentinel_auth, Some(sentinel_config))
+        .expect("seed sentinel codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before failover");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before failover");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Primary".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "primary-key"},
+                    "config": r#"model_provider = "primary"
+[model_providers.primary]
+base_url = "https://primary.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Secondary".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "secondary-key"},
+                    "config": r#"model_provider = "secondary"
+[model_providers.secondary]
+base_url = "https://secondary.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    rt.block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("set local-only routing mode");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider");
+
+    rt.block_on(state.proxy_service.switch_proxy_target("codex", "p2"))
+        .expect("failover switch in local-only mode");
+
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("p2"),
+        "failover should update the internal Codex current provider"
+    );
+    assert!(
+        rt.block_on(state.db.get_live_backup("codex"))
+            .expect("read live backup")
+            .is_none(),
+        "local-only failover must not create or update Codex live backups"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after failover"),
+        original_auth,
+        "local-only failover must not rewrite auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after failover"),
+        original_config,
+        "local-only failover must not rewrite config.toml"
+    );
+}
+
+#[test]
 fn provider_service_update_current_codex_local_only_does_not_write_live_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
