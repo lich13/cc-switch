@@ -273,6 +273,7 @@ impl ProviderRouter {
 mod tests {
     use super::*;
     use crate::database::Database;
+    use crate::proxy::ProxyRoutingMode;
     use serde_json::json;
     use serial_test::serial;
     use std::env;
@@ -393,6 +394,45 @@ mod tests {
         // 故障转移开启时：仅按队列顺序选择（忽略当前供应商）
         assert_eq!(providers[0].id, "b");
         assert_eq!(providers[1].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_local_only_failover_enabled_uses_queue_order() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let provider_current = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            json!({}),
+            None,
+        );
+        let mut provider_p1 =
+            Provider::with_id("p1".to_string(), "Provider P1".to_string(), json!({}), None);
+        provider_p1.sort_index = Some(1);
+        let mut provider_p2 =
+            Provider::with_id("p2".to_string(), "Provider P2".to_string(), json!({}), None);
+        provider_p2.sort_index = Some(2);
+
+        db.save_provider("codex", &provider_current).unwrap();
+        db.save_provider("codex", &provider_p1).unwrap();
+        db.save_provider("codex", &provider_p2).unwrap();
+        db.set_current_provider("codex", "current").unwrap();
+        db.add_to_failover_queue("codex", "p1").unwrap();
+        db.add_to_failover_queue("codex", "p2").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.routing_mode = ProxyRoutingMode::LocalOnly;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("codex").await.unwrap();
+
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "p1");
+        assert_eq!(providers[1].id, "p2");
     }
 
     #[tokio::test]

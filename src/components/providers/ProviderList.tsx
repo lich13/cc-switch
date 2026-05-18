@@ -42,6 +42,7 @@ import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
 } from "@/lib/query/omo";
+import { useProxyRoutingMode } from "@/lib/query/proxy";
 import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -149,11 +150,14 @@ export function ProviderList({
   // 故障转移相关
   const { data: isAutoFailoverEnabled } = useAutoFailoverEnabled(appId);
   const { data: failoverQueue } = useFailoverQueue(appId);
+  const { data: routingMode } = useProxyRoutingMode(appId);
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
 
+  const routeActive =
+    isProxyTakeover === true || (appId === "codex" && routingMode === "local_only");
   const isFailoverModeActive =
-    isProxyTakeover === true && isAutoFailoverEnabled === true;
+    routeActive && isAutoFailoverEnabled === true;
 
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);

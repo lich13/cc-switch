@@ -8,6 +8,9 @@ import { ProviderList } from "@/components/providers/ProviderList";
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
 const providerCardRenderSpy = vi.fn();
+let autoFailoverEnabledMock = false;
+let failoverQueueMock: Array<{ providerId: string; providerName: string }> = [];
+let routingModeMock: "off" | "file_takeover" | "local_only" = "off";
 
 vi.mock("@/hooks/useDragSort", () => ({
   useDragSort: (...args: unknown[]) => useDragSortMock(...args),
@@ -90,11 +93,15 @@ vi.mock("@/hooks/useStreamCheck", () => ({
 }));
 
 vi.mock("@/lib/query/failover", () => ({
-  useAutoFailoverEnabled: () => ({ data: false }),
-  useFailoverQueue: () => ({ data: [] }),
+  useAutoFailoverEnabled: () => ({ data: autoFailoverEnabledMock }),
+  useFailoverQueue: () => ({ data: failoverQueueMock }),
   useAddToFailoverQueue: () => ({ mutate: vi.fn() }),
   useRemoveFromFailoverQueue: () => ({ mutate: vi.fn() }),
   useReorderFailoverQueue: () => ({ mutate: vi.fn() }),
+}));
+
+vi.mock("@/lib/query/proxy", () => ({
+  useProxyRoutingMode: () => ({ data: routingModeMock }),
 }));
 
 function createProvider(overrides: Partial<Provider> = {}): Provider {
@@ -139,6 +146,9 @@ beforeEach(() => {
     sensors: [],
     handleDragEnd: vi.fn(),
   });
+  autoFailoverEnabledMock = false;
+  failoverQueueMock = [];
+  routingModeMock = "off";
 });
 
 describe("ProviderList Component", () => {
@@ -305,5 +315,55 @@ describe("ProviderList Component", () => {
     expect(
       screen.getByText("No providers match your search."),
     ).toBeInTheDocument();
+  });
+
+  it("shows Codex failover priorities when pure local route is active", () => {
+    const providerP1 = createProvider({ id: "p1", name: "P1 Provider" });
+    const providerP2 = createProvider({ id: "p2", name: "P2 Provider" });
+
+    autoFailoverEnabledMock = true;
+    routingModeMock = "local_only";
+    failoverQueueMock = [
+      { providerId: "p1", providerName: "P1 Provider" },
+      { providerId: "p2", providerName: "P2 Provider" },
+    ];
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [providerP1, providerP2],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ p1: providerP1, p2: providerP2 }}
+        currentProviderId="p1"
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        isProxyRunning
+        isProxyTakeover={false}
+        activeProviderId="p1"
+      />,
+    );
+
+    expect(providerCardRenderSpy).toHaveBeenCalledTimes(2);
+    expect(providerCardRenderSpy.mock.calls[0][0]).toMatchObject({
+      provider: providerP1,
+      isAutoFailoverEnabled: true,
+      isInFailoverQueue: true,
+      failoverPriority: 1,
+      activeProviderId: "p1",
+    });
+    expect(providerCardRenderSpy.mock.calls[1][0]).toMatchObject({
+      provider: providerP2,
+      isAutoFailoverEnabled: true,
+      isInFailoverQueue: true,
+      failoverPriority: 2,
+      activeProviderId: "p1",
+    });
   });
 });
