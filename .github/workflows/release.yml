@@ -611,6 +611,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lich13\.([0-9]+)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+          fi
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"
           # 初始化空平台映射
