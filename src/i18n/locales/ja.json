@@ -2227,6 +2227,15 @@
         "inactive": "{{appLabel}} のリクエストをローカルルーティング経由でルーティング"
       }
     },
+    "codexRoute": {
+      "copyCommand": "Codex 起動コマンドをコピー",
+      "commandCopied": "Codex 起動コマンドをコピーしました",
+      "toggleFailed": "Codex 純粋ルートの切り替えに失敗しました: {{detail}}",
+      "tooltip": {
+        "active": "Codex 純粋ルートが有効です。現在のターゲット: {{provider}} - {{baseUrl}}",
+        "inactive": "auth.json や config.toml を変更せずに Codex 純粋ローカルルートを開始します"
+      }
+    },
     "failover": {
       "proxyRequired": "フェイルオーバーを設定するには、ルーティングサービスを先に起動する必要があります",
       "autoSwitch": "自動フェイルオーバー",

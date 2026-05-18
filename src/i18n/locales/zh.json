@@ -2227,6 +2227,15 @@
         "inactive": "路由 {{appLabel}} 的请求，让该应用请求走本地路由"
       }
     },
+    "codexRoute": {
+      "copyCommand": "复制 Codex 启动命令",
+      "commandCopied": "Codex 启动命令已复制",
+      "toggleFailed": "切换 Codex 纯路由失败: {{detail}}",
+      "tooltip": {
+        "active": "Codex 纯路由已开启。当前目标: {{provider}} - {{baseUrl}}",
+        "inactive": "开启 Codex 纯本地路由，不修改 auth.json 或 config.toml"
+      }
+    },
     "failover": {
       "proxyRequired": "需要先启动路由服务才能配置故障转移",
       "autoSwitch": "自动故障转移",

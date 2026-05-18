@@ -4,6 +4,7 @@
 
 use crate::database::FailoverQueueItem;
 use crate::provider::Provider;
+use crate::proxy::ProxyRoutingMode;
 use crate::store::AppState;
 use std::str::FromStr;
 use tauri::Emitter;
@@ -93,7 +94,10 @@ pub async fn set_auto_failover_enabled(
         .await
         .map_err(|e| e.to_string())?;
 
-    if enabled && !config.enabled {
+    let route_active = config.enabled
+        || (app_type == "codex" && config.routing_mode == ProxyRoutingMode::LocalOnly);
+
+    if enabled && !route_active {
         return Err("需要先启用该应用的代理接管，再开启故障转移".to_string());
     }
 

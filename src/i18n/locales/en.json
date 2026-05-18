@@ -2227,6 +2227,15 @@
         "inactive": "Route {{appLabel}}'s requests through local routing"
       }
     },
+    "codexRoute": {
+      "copyCommand": "Copy Codex launch command",
+      "commandCopied": "Codex launch command copied",
+      "toggleFailed": "Failed to toggle Codex pure route: {{detail}}",
+      "tooltip": {
+        "active": "Codex pure route active. Current target: {{provider}} - {{baseUrl}}",
+        "inactive": "Start Codex pure local route without modifying auth.json or config.toml"
+      }
+    },
     "failover": {
       "proxyRequired": "Routing service must be started to configure failover",
       "autoSwitch": "Auto Failover",

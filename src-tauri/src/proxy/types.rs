@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+/// Per-app proxy routing mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyRoutingMode {
+    #[default]
+    Off,
+    FileTakeover,
+    LocalOnly,
+}
+
+impl ProxyRoutingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::FileTakeover => "file_takeover",
+            Self::LocalOnly => "local_only",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "file_takeover" => Some(Self::FileTakeover),
+            "local_only" => Some(Self::LocalOnly),
+            _ => None,
+        }
+    }
+}
+
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -107,14 +136,28 @@ pub struct ProxyServerInfo {
     pub started_at: String,
 }
 
+/// Codex pure local route info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLocalRouteInfo {
+    pub enabled: bool,
+    pub base_url: String,
+    pub launch_command: String,
+    pub active_provider_id: Option<String>,
+    pub active_provider_name: Option<String>,
+}
+
 /// 各应用的接管状态（是否改写该应用的 Live 配置指向本地代理）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxyTakeoverStatus {
     pub claude: bool,
+    #[serde(rename = "claude-desktop")]
+    pub claude_desktop: bool,
     pub codex: bool,
     pub gemini: bool,
     pub opencode: bool,
     pub openclaw: bool,
+    pub hermes: bool,
 }
 
 /// API 格式类型（预留，当前不需要格式转换）
@@ -172,6 +215,9 @@ pub struct AppProxyConfig {
     pub app_type: String,
     /// 该 app 代理启用开关
     pub enabled: bool,
+    /// 路由模式
+    #[serde(default)]
+    pub routing_mode: ProxyRoutingMode,
     /// 该 app 自动故障转移开关
     pub auto_failover_enabled: bool,
     /// 最大重试次数

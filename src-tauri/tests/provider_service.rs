@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppState, AppType,
+    McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -236,6 +236,443 @@ command = "say"
     assert_eq!(
         legacy_auth_value, "legacy-key",
         "previous provider should be backfilled with live auth"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_local_only_does_not_write_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let sentinel_auth = json!({ "OPENAI_API_KEY": "do-not-touch" });
+    let sentinel_config = r#"model_provider = "sentinel"
+model = "gpt-5.5"
+
+[model_providers.sentinel]
+name = "Sentinel"
+base_url = "https://sentinel.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&sentinel_auth, Some(sentinel_config))
+        .expect("seed sentinel codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before switch");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before switch");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "old-key"},
+                    "config": r#"model_provider = "old"
+[model_providers.old]
+base_url = "https://old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "new-key"},
+                    "config": r#"model_provider = "new"
+[model_providers.new]
+base_url = "https://new.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    futures::executor::block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("set local-only routing mode");
+
+    ProviderService::switch(&state, AppType::Codex, "new-provider")
+        .expect("switch provider should use hot-switch in local-only mode");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after switch"),
+        original_auth,
+        "local-only Codex switch must not rewrite auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after switch"),
+        original_config,
+        "local-only Codex switch must not rewrite config.toml"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("new-provider"),
+        "current provider should still update internally"
+    );
+}
+
+#[test]
+fn provider_service_update_current_codex_local_only_does_not_write_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let sentinel_auth = json!({ "OPENAI_API_KEY": "do-not-touch-update" });
+    let sentinel_config = r#"model_provider = "sentinel"
+[model_providers.sentinel]
+base_url = "https://sentinel.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&sentinel_auth, Some(sentinel_config))
+        .expect("seed sentinel codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before update");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before update");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "current-provider".to_string();
+        manager.providers.insert(
+            "current-provider".to_string(),
+            Provider::with_id(
+                "current-provider".to_string(),
+                "Current".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "old-key"},
+                    "config": r#"model_provider = "old"
+[model_providers.old]
+base_url = "https://old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    futures::executor::block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("set local-only routing mode");
+
+    ProviderService::update(
+        &state,
+        AppType::Codex,
+        Some("current-provider"),
+        Provider::with_id(
+            "current-provider".to_string(),
+            "Current Updated".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "new-key"},
+                "config": r#"model_provider = "new"
+[model_providers.new]
+base_url = "https://new.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        ),
+    )
+    .expect("update current provider in local-only mode");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after update"),
+        original_auth,
+        "local-only Codex provider update must not rewrite auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after update"),
+        original_config,
+        "local-only Codex provider update must not rewrite config.toml"
+    );
+}
+
+#[test]
+fn provider_service_add_first_codex_local_only_does_not_write_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let sentinel_auth = json!({ "OPENAI_API_KEY": "do-not-touch-add" });
+    let sentinel_config = r#"model_provider = "sentinel"
+[model_providers.sentinel]
+base_url = "https://sentinel.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&sentinel_auth, Some(sentinel_config))
+        .expect("seed sentinel codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before add");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before add");
+
+    let state =
+        create_test_state_with_config(&MultiAppConfig::default()).expect("create empty test state");
+    futures::executor::block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("set local-only routing mode");
+
+    ProviderService::add(
+        &state,
+        AppType::Codex,
+        Provider::with_id(
+            "first-provider".to_string(),
+            "First".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "first-key"},
+                "config": r#"model_provider = "first"
+[model_providers.first]
+base_url = "https://first.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        ),
+        true,
+    )
+    .expect("add first provider in local-only mode");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after add"),
+        original_auth,
+        "local-only Codex provider add must not rewrite auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after add"),
+        original_config,
+        "local-only Codex provider add must not rewrite config.toml"
+    );
+}
+
+fn setup_codex_file_takeover_then_local_only(
+) -> (AppState, tokio::runtime::Runtime, Vec<u8>, Vec<u8>) {
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
+    let legacy_config = r#"model_provider = "legacy"
+[model_providers.legacy]
+base_url = "https://legacy.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+        .expect("seed existing codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "proxy-provider".to_string();
+        manager.providers.insert(
+            "proxy-provider".to_string(),
+            Provider::with_id(
+                "proxy-provider".to_string(),
+                "Proxy".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "proxy-key"},
+                    "config": r#"model_provider = "proxy"
+[model_providers.proxy]
+base_url = "https://proxy.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    rt.block_on(state.proxy_service.set_takeover_for_app("codex", true))
+        .expect("enable codex file takeover");
+
+    let takeover_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after takeover");
+    let takeover_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after takeover");
+
+    rt.block_on(
+        state
+            .proxy_service
+            .set_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("switch file takeover to local-only");
+
+    (state, rt, takeover_auth, takeover_config)
+}
+
+#[test]
+fn codex_file_takeover_to_local_only_and_off_does_not_restore_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    let (state, rt, takeover_auth, takeover_config) = setup_codex_file_takeover_then_local_only();
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after local-only"),
+        takeover_auth,
+        "switching to local-only must not restore or rewrite auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path())
+            .expect("read config after local-only"),
+        takeover_config,
+        "switching to local-only must not restore or rewrite config.toml"
+    );
+
+    let config = futures::executor::block_on(state.db.get_proxy_config_for_app("codex"))
+        .expect("read codex proxy config");
+    assert!(
+        !config.enabled,
+        "local-only mode must clear file takeover enabled state"
+    );
+    assert_eq!(
+        config.routing_mode,
+        cc_switch_lib::ProxyRoutingMode::LocalOnly
+    );
+    assert!(
+        futures::executor::block_on(state.db.get_live_backup("codex"))
+            .expect("read codex live backup")
+            .is_none(),
+        "local-only transition should remove stale file-takeover backup"
+    );
+
+    rt.block_on(
+        state
+            .proxy_service
+            .set_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::Off),
+    )
+    .expect("turn local-only off");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after off"),
+        takeover_auth,
+        "turning local-only off must not restore auth.json"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after off"),
+        takeover_config,
+        "turning local-only off must not restore config.toml"
+    );
+}
+
+#[test]
+fn codex_local_only_crash_recovery_does_not_restore_or_rewrite_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    let (state, rt, takeover_auth, takeover_config) = setup_codex_file_takeover_then_local_only();
+
+    rt.block_on(state.proxy_service.recover_from_crash())
+        .expect("crash recovery should skip Codex local-only live files");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after recovery"),
+        takeover_auth,
+        "crash recovery must not rewrite auth.json while Codex local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after recovery"),
+        takeover_config,
+        "crash recovery must not rewrite config.toml while Codex local-only is active"
+    );
+    assert_eq!(
+        futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+            .expect("read codex routing mode"),
+        cc_switch_lib::ProxyRoutingMode::LocalOnly,
+        "crash recovery should preserve Codex local-only state"
+    );
+}
+
+#[test]
+fn codex_local_only_stop_with_restore_does_not_restore_or_rewrite_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    let (state, rt, takeover_auth, takeover_config) = setup_codex_file_takeover_then_local_only();
+
+    rt.block_on(state.proxy_service.stop_with_restore())
+        .expect("manual restore stop should skip Codex local-only live files");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after stop"),
+        takeover_auth,
+        "manual restore stop must not rewrite auth.json while Codex local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after stop"),
+        takeover_config,
+        "manual restore stop must not rewrite config.toml while Codex local-only is active"
+    );
+    assert_eq!(
+        futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+            .expect("read codex routing mode"),
+        cc_switch_lib::ProxyRoutingMode::Off,
+        "manual restore stop should turn Codex local-only off without touching live files"
+    );
+}
+
+#[test]
+fn codex_local_only_exit_restore_keep_state_does_not_restore_or_rewrite_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    let (state, rt, takeover_auth, takeover_config) = setup_codex_file_takeover_then_local_only();
+
+    rt.block_on(state.proxy_service.stop_with_restore_keep_state())
+        .expect("exit restore should skip Codex local-only live files");
+
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after exit restore"),
+        takeover_auth,
+        "exit restore must not rewrite auth.json while Codex local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path())
+            .expect("read config after exit restore"),
+        takeover_config,
+        "exit restore must not rewrite config.toml while Codex local-only is active"
+    );
+    assert_eq!(
+        futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+            .expect("read codex routing mode"),
+        cc_switch_lib::ProxyRoutingMode::LocalOnly,
+        "exit restore should preserve Codex local-only state for startup recovery"
     );
 }
 

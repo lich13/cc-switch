@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::app_config::{AppType, McpServer};
 use crate::error::AppError;
 use crate::mcp;
+use crate::proxy::types::ProxyRoutingMode;
 use crate::store::AppState;
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
@@ -90,9 +91,9 @@ impl McpService {
     }
 
     /// 将 MCP 服务器同步到所有启用的应用
-    fn sync_server_to_apps(_state: &AppState, server: &McpServer) -> Result<(), AppError> {
+    fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
         for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app_no_config(server, &app)?;
+            Self::sync_server_to_app(state, server, &app)?;
         }
 
         Ok(())
@@ -100,10 +101,11 @@ impl McpService {
 
     /// 将 MCP 服务器同步到指定应用
     fn sync_server_to_app(
-        _state: &AppState,
+        state: &AppState,
         server: &McpServer,
         app: &AppType,
     ) -> Result<(), AppError> {
+        Self::ensure_app_live_write_allowed(state, app, "MCP sync")?;
         Self::sync_server_to_app_no_config(server, app)
     }
 
@@ -154,7 +156,8 @@ impl McpService {
         Ok(())
     }
 
-    fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
+    fn remove_server_from_app(state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
+        Self::ensure_app_live_write_allowed(state, app, "MCP removal")?;
         match app {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::ClaudeDesktop => {
@@ -176,6 +179,24 @@ impl McpService {
         Ok(())
     }
 
+    fn ensure_app_live_write_allowed(
+        state: &AppState,
+        app: &AppType,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        if matches!(app, AppType::Codex) {
+            let mode =
+                futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                    .unwrap_or(ProxyRoutingMode::Off);
+            if mode == ProxyRoutingMode::LocalOnly {
+                return Err(AppError::Message(format!(
+                    "Codex pure routing is active; refusing to write Codex live config for {operation}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 手动同步所有启用的 MCP 服务器到对应的应用
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
@@ -183,6 +204,15 @@ impl McpService {
         for app in AppType::all() {
             if matches!(app, AppType::OpenClaw | AppType::ClaudeDesktop) {
                 continue;
+            }
+            if matches!(app, AppType::Codex) {
+                let mode =
+                    futures::executor::block_on(state.db.get_proxy_routing_mode_for_app("codex"))
+                        .unwrap_or(ProxyRoutingMode::Off);
+                if mode == ProxyRoutingMode::LocalOnly {
+                    log::info!("Codex pure local route is active; skipping Codex MCP live sync");
+                    continue;
+                }
             }
 
             for server in servers.values() {

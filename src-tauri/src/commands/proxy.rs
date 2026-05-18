@@ -20,10 +20,12 @@ pub async fn start_proxy_server(
 pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let takeover = state.proxy_service.get_takeover_status().await?;
     if takeover.claude
+        || takeover.claude_desktop
         || takeover.codex
         || takeover.gemini
         || takeover.opencode
         || takeover.openclaw
+        || takeover.hermes
     {
         return Err(
             "仍有应用处于代理接管状态，请先在设置中关闭对应应用接管后再停止本地路由。".to_string(),
@@ -58,6 +60,36 @@ pub async fn set_proxy_takeover_for_app(
         .proxy_service
         .set_takeover_for_app(&app_type, enabled)
         .await
+}
+
+#[tauri::command]
+pub async fn get_proxy_routing_mode_for_app(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<ProxyRoutingMode, String> {
+    state
+        .proxy_service
+        .get_routing_mode_for_app(&app_type)
+        .await
+}
+
+#[tauri::command]
+pub async fn set_proxy_routing_mode_for_app(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    mode: ProxyRoutingMode,
+) -> Result<(), String> {
+    state
+        .proxy_service
+        .set_routing_mode_for_app(&app_type, mode)
+        .await
+}
+
+#[tauri::command]
+pub async fn get_codex_local_route_info(
+    state: tauri::State<'_, AppState>,
+) -> Result<CodexLocalRouteInfo, String> {
+    state.proxy_service.get_codex_local_route_info().await
 }
 
 /// 获取代理服务器状态
@@ -340,7 +372,11 @@ pub async fn reset_circuit_breaker(
     // 3. 检查是否应该切回优先级更高的供应商（从 proxy_config 表读取）
     // 只有当该应用已被代理接管（enabled=true）且开启了自动故障转移时才执行
     let (app_enabled, auto_failover_enabled) = match db.get_proxy_config_for_app(&app_type).await {
-        Ok(config) => (config.enabled, config.auto_failover_enabled),
+        Ok(config) => (
+            config.enabled
+                || (app_type == "codex" && config.routing_mode == ProxyRoutingMode::LocalOnly),
+            config.auto_failover_enabled,
+        ),
         Err(e) => {
             log::error!("[{app_type}] Failed to read proxy_config: {e}, defaulting to disabled");
             (false, false)

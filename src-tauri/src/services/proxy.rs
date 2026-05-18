@@ -376,10 +376,161 @@ impl ProxyService {
 
         Ok(ProxyTakeoverStatus {
             claude: claude_enabled,
+            claude_desktop: false,
             codex: codex_enabled,
             gemini: gemini_enabled,
             opencode: opencode_enabled,
             openclaw: openclaw_enabled,
+            hermes: false,
+        })
+    }
+
+    pub async fn get_routing_mode_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<ProxyRoutingMode, String> {
+        self.db
+            .get_proxy_routing_mode_for_app(app_type)
+            .await
+            .map_err(|e| format!("获取 {app_type} 路由模式失败: {e}"))
+    }
+
+    pub async fn set_routing_mode_for_app(
+        &self,
+        app_type: &str,
+        mode: ProxyRoutingMode,
+    ) -> Result<(), String> {
+        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app_type_str = app.as_str();
+
+        match mode {
+            ProxyRoutingMode::FileTakeover => {
+                self.set_takeover_for_app(app_type_str, true).await?;
+                self.db
+                    .set_proxy_routing_mode_for_app(app_type_str, ProxyRoutingMode::FileTakeover)
+                    .await
+                    .map_err(|e| format!("设置 {app_type_str} 路由模式失败: {e}"))?;
+            }
+            ProxyRoutingMode::LocalOnly => {
+                if !matches!(app, AppType::Codex) {
+                    return Err("目前只有 Codex 支持纯本地路由模式".to_string());
+                }
+                if !self.is_running().await {
+                    self.start().await?;
+                }
+
+                let mut current_config = self
+                    .db
+                    .get_proxy_config_for_app(app_type_str)
+                    .await
+                    .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
+                if current_config.enabled {
+                    current_config.enabled = false;
+                    self.db
+                        .update_proxy_config_for_app(current_config)
+                        .await
+                        .map_err(|e| format!("清除 {app_type_str} 文件接管状态失败: {e}"))?;
+                }
+                self.db
+                    .delete_live_backup(app_type_str)
+                    .await
+                    .map_err(|e| format!("清理 {app_type_str} Live 备份失败: {e}"))?;
+                let any_file_takeover = self
+                    .db
+                    .is_live_takeover_active()
+                    .await
+                    .map_err(|e| format!("检查接管状态失败: {e}"))?;
+                if !any_file_takeover {
+                    let _ = self.db.set_live_takeover_active(false).await;
+                }
+
+                self.db
+                    .set_proxy_routing_mode_for_app(app_type_str, ProxyRoutingMode::LocalOnly)
+                    .await
+                    .map_err(|e| format!("设置 {app_type_str} 路由模式失败: {e}"))?;
+
+                if let Ok(Some(current_id)) =
+                    crate::settings::get_effective_current_provider(&self.db, &app)
+                {
+                    if let Ok(Some(provider)) =
+                        self.db.get_provider_by_id(&current_id, app_type_str)
+                    {
+                        if let Some(server) = self.server.read().await.as_ref() {
+                            server
+                                .set_active_target(app_type_str, &provider.id, &provider.name)
+                                .await;
+                        }
+                    }
+                }
+            }
+            ProxyRoutingMode::Off => {
+                let current_mode = self
+                    .db
+                    .get_proxy_routing_mode_for_app(app_type_str)
+                    .await
+                    .unwrap_or(ProxyRoutingMode::Off);
+                let takeover_enabled = self
+                    .db
+                    .get_proxy_config_for_app(app_type_str)
+                    .await
+                    .map(|config| config.enabled)
+                    .unwrap_or(false);
+
+                if current_mode == ProxyRoutingMode::FileTakeover || takeover_enabled {
+                    self.set_takeover_for_app(app_type_str, false).await?;
+                }
+
+                self.db
+                    .set_proxy_routing_mode_for_app(app_type_str, ProxyRoutingMode::Off)
+                    .await
+                    .map_err(|e| format!("设置 {app_type_str} 路由模式失败: {e}"))?;
+                self.db
+                    .clear_provider_health_for_app(app_type_str)
+                    .await
+                    .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
+
+                let any_route_active = self
+                    .db
+                    .is_any_proxy_route_active()
+                    .await
+                    .map_err(|e| format!("检查路由状态失败: {e}"))?;
+                if !any_route_active && self.is_running().await {
+                    let _ = self.stop().await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_codex_local_route_info(&self) -> Result<CodexLocalRouteInfo, String> {
+        let mode = self
+            .db
+            .get_proxy_routing_mode_for_app("codex")
+            .await
+            .map_err(|e| format!("获取 Codex 路由模式失败: {e}"))?;
+        let (_, base_url) = self.build_proxy_urls().await?;
+        let active_provider_id =
+            crate::settings::get_effective_current_provider(&self.db, &AppType::Codex)
+                .map_err(|e| format!("获取 Codex 当前供应商失败: {e}"))?;
+        let active_provider_name = match active_provider_id.as_deref() {
+            Some(id) => self
+                .db
+                .get_provider_by_id(id, "codex")
+                .map_err(|e| format!("读取 Codex 当前供应商失败: {e}"))?
+                .map(|provider| provider.name),
+            None => None,
+        };
+        let launch_command = format!(
+            "OPENAI_API_KEY=PROXY_MANAGED codex \\\n  -c 'model_provider=\"ccswitch-local\"' \\\n  -c 'model_providers.ccswitch-local.name=\"CC Switch Local Route\"' \\\n  -c 'model_providers.ccswitch-local.requires_openai_auth=true' \\\n  -c 'model_providers.ccswitch-local.base_url=\"{base_url}\"' \\\n  -c 'model_providers.ccswitch-local.wire_api=\"responses\"'"
+        );
+
+        Ok(CodexLocalRouteInfo {
+            enabled: mode == ProxyRoutingMode::LocalOnly,
+            base_url,
+            launch_command,
+            active_provider_id,
+            active_provider_name,
         })
     }
 
@@ -463,6 +614,10 @@ impl ProxyService {
                 .update_proxy_config_for_app(updated_config)
                 .await
                 .map_err(|e| format!("设置 {app_type_str} enabled 状态失败: {e}"))?;
+            self.db
+                .set_proxy_routing_mode_for_app(app_type_str, ProxyRoutingMode::FileTakeover)
+                .await
+                .map_err(|e| format!("设置 {app_type_str} 路由模式失败: {e}"))?;
 
             // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能）
             let _ = self.db.set_live_takeover_active(true).await;
@@ -524,6 +679,10 @@ impl ProxyService {
             .update_proxy_config_for_app(updated_config)
             .await
             .map_err(|e| format!("清除 {app_type_str} enabled 状态失败: {e}"))?;
+        self.db
+            .set_proxy_routing_mode_for_app(app_type_str, ProxyRoutingMode::Off)
+            .await
+            .map_err(|e| format!("清除 {app_type_str} 路由模式失败: {e}"))?;
 
         // 4) 清除该应用的健康状态（关闭代理时重置队列状态）
         self.db
@@ -850,10 +1009,11 @@ impl ProxyService {
         // 4. 清除所有应用的 enabled 状态（用户手动关闭，不需要下次自动恢复）
         for app_type in ["claude", "codex", "gemini"] {
             if let Ok(mut config) = self.db.get_proxy_config_for_app(app_type).await {
-                if config.enabled {
+                if config.enabled || config.routing_mode != ProxyRoutingMode::Off {
                     config.enabled = false;
+                    config.routing_mode = ProxyRoutingMode::Off;
                     if let Err(e) = self.db.update_proxy_config_for_app(config).await {
-                        log::warn!("清除 {app_type} enabled 状态失败: {e}");
+                        log::warn!("清除 {app_type} 路由状态失败: {e}");
                     }
                 }
             }
@@ -1222,6 +1382,10 @@ impl ProxyService {
         app_type: &AppType,
     ) -> Result<(), String> {
         let app_type_str = app_type.as_str();
+        if self.should_skip_live_restore_for_app(app_type).await {
+            log::info!("{app_type_str} 处于纯本地路由模式，跳过 Live 配置恢复");
+            return Ok(());
+        }
 
         // 1) 优先从 Live 备份恢复（这是"原始 Live"的唯一可靠来源）
         let backup = self
@@ -1483,6 +1647,42 @@ impl ProxyService {
         false
     }
 
+    pub async fn detect_recoverable_takeover_in_live_configs(&self) -> bool {
+        if let Ok(config) = self.read_claude_live() {
+            if Self::is_claude_live_taken_over(&config) {
+                return true;
+            }
+        }
+
+        if !self.should_skip_live_restore_for_app(&AppType::Codex).await {
+            if let Ok(config) = self.read_codex_live() {
+                if Self::is_codex_live_taken_over(&config) {
+                    return true;
+                }
+            }
+        }
+
+        if let Ok(config) = self.read_gemini_live() {
+            if Self::is_gemini_live_taken_over(&config) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    async fn should_skip_live_restore_for_app(&self, app_type: &AppType) -> bool {
+        if !matches!(app_type, AppType::Codex) {
+            return false;
+        }
+
+        self.db
+            .get_proxy_routing_mode_for_app(app_type.as_str())
+            .await
+            .map(|mode| mode == ProxyRoutingMode::LocalOnly)
+            .unwrap_or(false)
+    }
+
     fn is_claude_live_taken_over(config: &Value) -> bool {
         let env = match config.get("env").and_then(|v| v.as_object()) {
             Some(env) => env,
@@ -1638,7 +1838,14 @@ impl ProxyService {
             .map_err(|e| format!("读取 {app_type} 备份失败: {e}"))?
             .is_some();
         let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
-        let should_sync_backup = has_backup || live_taken_over;
+        let codex_local_only = matches!(app_type_enum, AppType::Codex)
+            && self
+                .db
+                .get_proxy_routing_mode_for_app(app_type_enum.as_str())
+                .await
+                .map(|mode| mode == ProxyRoutingMode::LocalOnly)
+                .unwrap_or(false);
+        let should_sync_backup = !codex_local_only && (has_backup || live_taken_over);
 
         self.db
             .set_current_provider(app_type_enum.as_str(), provider_id)
