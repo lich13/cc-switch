@@ -36,7 +36,9 @@ jobs:
           git fetch upstream main --tags
           git checkout -B chore/sync-upstream origin/main
           git merge --no-edit upstream/main
-          if git diff --quiet origin/main...HEAD; then
+          # Compare trees, not history ranges. origin/main already includes our fork-only
+          # release/version changes, so triple-dot would report them as "changed" forever.
+          if git diff --quiet origin/main HEAD; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -60,9 +62,15 @@ jobs:
           BODY
           existing="$(gh pr list --head chore/sync-upstream --base main --state open --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
-            gh pr edit "$existing" --title "chore: sync upstream cc-switch" --body-file "$body_file"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
+              -f title="chore: sync upstream cc-switch" \
+              -F body=@"$body_file"
           else
-            gh pr create --base main --head chore/sync-upstream --title "chore: sync upstream cc-switch" --body-file "$body_file"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f base=main \
+              -f head=chore/sync-upstream \
+              -f title="chore: sync upstream cc-switch" \
+              -F body=@"$body_file"
           fi
 
       - name: Setup Node.js
