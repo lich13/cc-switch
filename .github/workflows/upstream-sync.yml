@@ -1,4 +1,4 @@
-name: Upstream Sync
+name: Upstream Release Sync
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: upstream-sync
+  group: upstream-release-sync
   cancel-in-progress: false
 
 jobs:
@@ -28,16 +28,32 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge upstream main
+      - name: Resolve latest upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo farion1231/cc-switch --json tagName --jq .tagName)"
+          if [ -z "$tag" ]; then
+            echo "No upstream release tag found" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release tag: $tag"
+
+      - name: Merge latest upstream release tag
         id: merge
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/farion1231/cc-switch.git
-          git fetch upstream main --tags
-          git checkout -B chore/sync-upstream origin/main
-          git merge --no-edit upstream/main
-          # Compare trees, not history ranges. origin/main already includes our fork-only
-          # release/version changes, so triple-dot would report them as "changed" forever.
+          git fetch upstream "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}" --no-tags
+          git checkout -B chore/sync-upstream-release origin/main
+          git merge --no-edit "$UPSTREAM_TAG"
+          # Compare trees, not history ranges. The fork carries release/config
+          # commits, so only a tree change means the released upstream tag matters.
           if git diff --quiet origin/main HEAD; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -46,30 +62,31 @@ jobs:
 
       - name: Push sync branch
         if: steps.merge.outputs.changed == 'true'
-        run: git push --force-with-lease origin chore/sync-upstream
+        run: git push --force-with-lease origin chore/sync-upstream-release
 
       - name: Create or update pull request
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.SYNC_PAT || github.token }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           body_file="$(mktemp)"
           cat > "$body_file" <<'BODY'
-          Automated sync from `farion1231/cc-switch` into this fork.
+          Automated sync from the latest published `farion1231/cc-switch` release into this fork.
 
           If this PR has conflicts, resolve them by keeping fork-specific pure local route and release configuration changes while taking upstream bug fixes.
           BODY
-          existing="$(gh pr list --head chore/sync-upstream --base main --state open --json number --jq '.[0].number // empty')"
+          existing="$(gh pr list --head chore/sync-upstream-release --base main --state open --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
-              -f title="chore: sync upstream cc-switch" \
+              -f title="chore: sync upstream release ${UPSTREAM_TAG}" \
               -F body=@"$body_file"
           else
             gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" \
               -f base=main \
-              -f head=chore/sync-upstream \
-              -f title="chore: sync upstream cc-switch" \
+              -f head=chore/sync-upstream-release \
+              -f title="chore: sync upstream release ${UPSTREAM_TAG}" \
               -F body=@"$body_file"
           fi
 
