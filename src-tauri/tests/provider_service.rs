@@ -1,9 +1,8 @@
-use serde_json::json;
-
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppState, AppType,
+    McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
+use serde_json::json;
 
 #[path = "support.rs"]
 mod support;
@@ -19,6 +18,22 @@ fn sanitize_provider_name(name: &str) -> String {
         })
         .collect::<String>()
         .to_lowercase()
+}
+
+fn set_ephemeral_proxy_port(state: &AppState, rt: &tokio::runtime::Runtime) {
+    let mut global_config = rt
+        .block_on(state.db.get_global_proxy_config())
+        .expect("read proxy config");
+    global_config.listen_port = 0;
+    rt.block_on(state.db.update_global_proxy_config(global_config))
+        .expect("set ephemeral proxy port");
+    assert_eq!(
+        rt.block_on(state.db.get_proxy_config())
+            .expect("read effective proxy config")
+            .listen_port,
+        0,
+        "test should bind the proxy to an ephemeral port"
+    );
 }
 
 #[test]
@@ -410,6 +425,7 @@ requires_openai_auth = true
             .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
     )
     .expect("set local-only routing mode");
+    set_ephemeral_proxy_port(&state, &rt);
     state
         .db
         .set_current_provider(AppType::Codex.as_str(), "p1")
@@ -635,6 +651,7 @@ requires_openai_auth = true
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
     let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    set_ephemeral_proxy_port(&state, &rt);
     rt.block_on(state.proxy_service.set_takeover_for_app("codex", true))
         .expect("enable codex file takeover");
 
@@ -783,6 +800,195 @@ fn codex_local_only_exit_restore_keep_state_does_not_restore_or_rewrite_live_fil
         cc_switch_lib::ProxyRoutingMode::LocalOnly,
         "exit restore should preserve Codex local-only state for startup recovery"
     );
+}
+
+#[test]
+fn codex_local_only_global_takeover_does_not_sync_live_token_or_rewrite_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({ "OPENAI_API_KEY": "live-key-must-not-win" });
+    let live_config = r#"model_provider = "live"
+[model_providers.live]
+base_url = "https://live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(live_config)).expect("seed codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before takeover");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before takeover");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "db-provider".to_string();
+        manager.providers.insert(
+            "db-provider".to_string(),
+            Provider::with_id(
+                "db-provider".to_string(),
+                "DB Provider".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "db-key-should-stay"},
+                    "config": r#"model_provider = "db-provider"
+[model_providers.db-provider]
+base_url = "https://db.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    rt.block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("enable codex local-only route");
+    set_ephemeral_proxy_port(&state, &rt);
+
+    rt.block_on(state.proxy_service.start_with_takeover())
+        .expect("global takeover should not touch Codex local-only live files");
+
+    let provider = state
+        .db
+        .get_provider_by_id("db-provider", AppType::Codex.as_str())
+        .expect("read provider")
+        .expect("provider exists");
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|v| v.get("OPENAI_API_KEY"))
+            .and_then(|v| v.as_str()),
+        Some("db-key-should-stay"),
+        "global takeover must not backfill Codex provider tokens from live files while local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after takeover"),
+        original_auth,
+        "global takeover must not rewrite auth.json while Codex local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after takeover"),
+        original_config,
+        "global takeover must not rewrite config.toml while Codex local-only is active"
+    );
+
+    let _ = rt.block_on(state.proxy_service.stop());
+}
+
+#[test]
+fn codex_local_only_rejects_legacy_file_takeover_entrypoint_without_touching_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({ "OPENAI_API_KEY": "live-key-must-not-be-touched" });
+    let live_config = r#"model_provider = "live"
+[model_providers.live]
+base_url = "https://live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(live_config)).expect("seed codex live config");
+    let original_auth =
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth before takeover");
+    let original_config =
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config before takeover");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "db-provider".to_string();
+        manager.providers.insert(
+            "db-provider".to_string(),
+            Provider::with_id(
+                "db-provider".to_string(),
+                "DB Provider".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "db-key-should-stay"},
+                    "config": r#"model_provider = "db-provider"
+[model_providers.db-provider]
+base_url = "https://db.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+    rt.block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("enable codex local-only route");
+    set_ephemeral_proxy_port(&state, &rt);
+
+    rt.block_on(state.proxy_service.set_takeover_for_app("codex", true))
+        .expect("legacy file takeover entrypoint should become a local-only no-op");
+
+    let provider = state
+        .db
+        .get_provider_by_id("db-provider", AppType::Codex.as_str())
+        .expect("read provider")
+        .expect("provider exists");
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|v| v.get("OPENAI_API_KEY"))
+            .and_then(|v| v.as_str()),
+        Some("db-key-should-stay"),
+        "legacy file takeover must not backfill Codex provider tokens from live files while local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth after takeover"),
+        original_auth,
+        "legacy file takeover must not rewrite auth.json while Codex local-only is active"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config after takeover"),
+        original_config,
+        "legacy file takeover must not rewrite config.toml while Codex local-only is active"
+    );
+
+    let config = rt
+        .block_on(state.db.get_proxy_config_for_app("codex"))
+        .expect("read codex proxy config");
+    assert!(
+        !config.enabled,
+        "legacy file takeover must not mark Codex file takeover enabled while local-only is active"
+    );
+    assert_eq!(
+        config.routing_mode,
+        cc_switch_lib::ProxyRoutingMode::LocalOnly,
+        "legacy file takeover must preserve Codex local-only routing mode"
+    );
+    assert!(
+        rt.block_on(state.db.get_live_backup("codex"))
+            .expect("read codex live backup")
+            .is_none(),
+        "legacy file takeover must not create a Codex live backup while local-only is active"
+    );
+
+    let _ = rt.block_on(state.proxy_service.stop());
 }
 
 #[test]

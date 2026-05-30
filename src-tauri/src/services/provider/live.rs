@@ -1089,6 +1089,18 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     if app_type.is_additive_mode() {
         return Ok(false);
     }
+    if matches!(app_type, AppType::Codex) {
+        let routing_mode = futures::executor::block_on(
+            state
+                .db
+                .get_proxy_routing_mode_for_app(AppType::Codex.as_str()),
+        )
+        .unwrap_or(ProxyRoutingMode::Off);
+        if routing_mode == ProxyRoutingMode::LocalOnly {
+            log::info!("Codex pure local route is active; skipping Codex default live import");
+            return Ok(false);
+        }
+    }
 
     // 允许 "只有官方 seed 预设" 的情况下继续导入 live：
     // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
@@ -1212,6 +1224,17 @@ pub fn should_import_default_config_on_startup(
 ) -> Result<bool, AppError> {
     if app_type.is_additive_mode() {
         return Ok(false);
+    }
+    if matches!(app_type, AppType::Codex) {
+        let routing_mode = futures::executor::block_on(
+            state
+                .db
+                .get_proxy_routing_mode_for_app(AppType::Codex.as_str()),
+        )
+        .unwrap_or(ProxyRoutingMode::Off);
+        if routing_mode == ProxyRoutingMode::LocalOnly {
+            return Ok(false);
+        }
     }
 
     Ok(!state.db.has_any_provider_for_app(app_type.as_str())?)

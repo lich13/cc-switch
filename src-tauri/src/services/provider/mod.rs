@@ -63,12 +63,12 @@ mod tests {
     use crate::provider::ProviderMeta;
     #[cfg(any(target_os = "macos", windows))]
     use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
-    use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
     use serial_test::serial;
     use std::env;
     use std::fs;
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::TempDir;
@@ -183,6 +183,38 @@ mod tests {
         }
 
         result
+    }
+
+    async fn set_ephemeral_proxy_port(state: &AppState) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
+        let port = listener
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port();
+        drop(listener);
+
+        let mut global_config = state
+            .db
+            .get_global_proxy_config()
+            .await
+            .expect("read proxy config");
+        global_config.listen_port = port;
+        state
+            .db
+            .update_global_proxy_config(global_config)
+            .await
+            .expect("set ephemeral proxy port");
+        assert_eq!(
+            state
+                .db
+                .get_proxy_config()
+                .await
+                .expect("read effective proxy config")
+                .listen_port,
+            port,
+            "test should bind the proxy to an isolated port"
+        );
+        port
     }
 
     fn openclaw_provider(id: &str) -> Provider {
@@ -399,6 +431,7 @@ base_url = "http://localhost:8080"
 
         let db = Arc::new(Database::memory().expect("init db"));
         let state = AppState::new(db.clone());
+        let proxy_port = set_ephemeral_proxy_port(&state).await;
 
         let original = Provider::with_id(
             "p1".into(),
@@ -420,12 +453,11 @@ base_url = "http://localhost:8080"
         crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
             .expect("set local current provider");
 
-        db.update_proxy_config(ProxyConfig {
-            live_takeover_active: true,
-            ..Default::default()
-        })
-        .await
-        .expect("update proxy config");
+        let mut proxy_config = db.get_proxy_config().await.expect("read proxy config");
+        proxy_config.live_takeover_active = true;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("update proxy config");
         {
             let mut config = db
                 .get_proxy_config_for_app("claude")
@@ -441,7 +473,7 @@ base_url = "http://localhost:8080"
             &get_claude_settings_path(),
             &json!({
                 "env": {
-                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                    "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{proxy_port}"),
                     "ANTHROPIC_API_KEY": "PROXY_MANAGED",
                     "ANTHROPIC_MODEL": "stale-model"
                 },
@@ -455,6 +487,15 @@ base_url = "http://localhost:8080"
             .start()
             .await
             .expect("start proxy service");
+        let proxy_url = format!(
+            "http://127.0.0.1:{}",
+            state
+                .proxy_service
+                .get_status()
+                .await
+                .expect("get proxy status")
+                .port
+        );
 
         let updated = Provider::with_id(
             "p1".into(),
@@ -503,7 +544,7 @@ base_url = "http://localhost:8080"
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721"),
+            Some(proxy_url.as_str()),
             "proxy base URL should stay intact"
         );
         assert!(
@@ -523,6 +564,7 @@ base_url = "http://localhost:8080"
 
         let db = Arc::new(Database::memory().expect("init db"));
         let state = AppState::new(db.clone());
+        set_ephemeral_proxy_port(&state).await;
 
         let mut original = Provider::with_id(
             "p1".into(),
@@ -576,6 +618,15 @@ base_url = "http://localhost:8080"
             .start()
             .await
             .expect("start proxy service");
+        let desktop_proxy_url = format!(
+            "http://127.0.0.1:{}/claude-desktop",
+            state
+                .proxy_service
+                .get_status()
+                .await
+                .expect("get proxy status")
+                .port
+        );
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -619,7 +670,7 @@ base_url = "http://localhost:8080"
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(desktop_proxy_url),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2182,6 +2233,25 @@ impl ProviderService {
 
     /// Read current live settings (re-export)
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
+        read_live_settings(app_type)
+    }
+
+    /// Read current live settings for UI edit forms.
+    ///
+    /// Codex pure routing treats the database provider as the editable source
+    /// of truth, so UI reads must not import `~/.codex` live state.
+    pub fn read_live_settings_for_ui(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<Value, AppError> {
+        if Self::is_codex_local_only_active(state, &app_type) {
+            return Err(AppError::localized(
+                "codex.pure_route.live_read_blocked",
+                "Codex 纯路由已开启，拒绝读取 Codex live 配置",
+                "Codex pure routing is active; refusing to read Codex live config",
+            ));
+        }
+
         read_live_settings(app_type)
     }
 

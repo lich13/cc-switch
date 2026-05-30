@@ -238,6 +238,30 @@ impl Database {
         }
     }
 
+    pub fn get_proxy_routing_mode_for_app_sync(
+        &self,
+        app_type: &str,
+    ) -> Result<ProxyRoutingMode, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT routing_mode FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get::<_, String>(0),
+            )
+        };
+
+        match result {
+            Ok(value) => ProxyRoutingMode::from_db(value.trim()).ok_or_else(|| {
+                AppError::Database(format!(
+                    "Invalid proxy routing_mode for {app_type}: {value}"
+                ))
+            }),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(ProxyRoutingMode::Off),
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
     pub async fn set_proxy_routing_mode_for_app(
         &self,
         app_type: &str,

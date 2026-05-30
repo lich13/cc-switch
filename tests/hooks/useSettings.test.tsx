@@ -6,6 +6,7 @@ import type { Settings } from "@/types";
 const mutateAsyncMock = vi.fn();
 const useSettingsQueryMock = vi.fn();
 const setAppConfigDirOverrideMock = vi.fn();
+const setAutoLaunchMock = vi.fn();
 const applyClaudePluginConfigMock = vi.fn();
 const applyClaudeOnboardingSkipMock = vi.fn();
 const clearClaudeOnboardingSkipMock = vi.fn();
@@ -65,6 +66,7 @@ vi.mock("@/lib/api", () => ({
   settingsApi: {
     setAppConfigDirOverride: (...args: unknown[]) =>
       setAppConfigDirOverrideMock(...args),
+    setAutoLaunch: (...args: unknown[]) => setAutoLaunchMock(...args),
     applyClaudePluginConfig: (...args: unknown[]) =>
       applyClaudePluginConfigMock(...args),
     applyClaudeOnboardingSkip: (...args: unknown[]) =>
@@ -135,11 +137,22 @@ const createMetadataMock = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const createDeferred = <T = void,>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+};
+
 describe("useSettings hook", () => {
   beforeEach(() => {
     mutateAsyncMock.mockReset();
     useSettingsQueryMock.mockReset();
     setAppConfigDirOverrideMock.mockReset();
+    setAutoLaunchMock.mockReset();
     applyClaudePluginConfigMock.mockReset();
     applyClaudeOnboardingSkipMock.mockReset();
     clearClaudeOnboardingSkipMock.mockReset();
@@ -180,6 +193,7 @@ describe("useSettings hook", () => {
 
     mutateAsyncMock.mockResolvedValue(true);
     setAppConfigDirOverrideMock.mockResolvedValue(true);
+    setAutoLaunchMock.mockResolvedValue(true);
     applyClaudePluginConfigMock.mockResolvedValue(true);
     applyClaudeOnboardingSkipMock.mockResolvedValue(true);
     clearClaudeOnboardingSkipMock.mockResolvedValue(true);
@@ -341,11 +355,168 @@ describe("useSettings hook", () => {
 
     expect(saveResult).toEqual({ requiresRestart: false });
     expect(setAppConfigDirOverrideMock).toHaveBeenCalledWith(null);
+    expect(setAutoLaunchMock).not.toHaveBeenCalled();
     // 状态未改变，不应调用 API
     expect(applyClaudePluginConfigMock).not.toHaveBeenCalled();
     expect(metadataMock.setRequiresRestart).toHaveBeenCalledWith(false);
     // 目录未变化，不应触发同步
     expect(syncCurrentProvidersLiveMock).not.toHaveBeenCalled();
+  });
+
+  it("updates OS auto-launch before auto-saving launchOnStartup", async () => {
+    const callOrder: string[] = [];
+    serverSettings = {
+      ...serverSettings,
+      launchOnStartup: false,
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: serverSettings,
+      isLoading: false,
+    });
+    settingsFormMock = createSettingsFormMock({
+      settings: {
+        ...serverSettings,
+        launchOnStartup: false,
+      },
+    });
+    setAutoLaunchMock.mockImplementationOnce(async () => {
+      callOrder.push("setAutoLaunch");
+      return true;
+    });
+    mutateAsyncMock.mockImplementationOnce(async () => {
+      callOrder.push("saveSettings");
+      return true;
+    });
+
+    const { result } = renderHook(() => useSettings());
+
+    await act(async () => {
+      await result.current.autoSaveSettings({ launchOnStartup: true });
+    });
+
+    expect(setAutoLaunchMock).toHaveBeenCalledWith(true);
+    expect(callOrder).toEqual(["setAutoLaunch", "saveSettings"]);
+  });
+
+  it("serializes launchOnStartup autosaves so final OS state follows the latest intent", async () => {
+    const firstAutoLaunchWrite = createDeferred();
+    const callOrder: string[] = [];
+    serverSettings = {
+      ...serverSettings,
+      launchOnStartup: false,
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: serverSettings,
+      isLoading: false,
+    });
+    settingsFormMock = createSettingsFormMock({
+      settings: {
+        ...serverSettings,
+        launchOnStartup: false,
+      },
+    });
+    setAutoLaunchMock.mockImplementation(async (enabled: boolean) => {
+      callOrder.push(`setAutoLaunch:${enabled}`);
+      if (enabled) {
+        await firstAutoLaunchWrite.promise;
+      }
+      return true;
+    });
+    mutateAsyncMock.mockImplementation(async (payload: Settings) => {
+      callOrder.push(`saveSettings:${payload.launchOnStartup}`);
+      return true;
+    });
+
+    const { result } = renderHook(() => useSettings());
+
+    let enablePromise!: Promise<{ requiresRestart: boolean } | null>;
+    let disablePromise!: Promise<{ requiresRestart: boolean } | null>;
+    await act(async () => {
+      enablePromise = result.current.autoSaveSettings({
+        launchOnStartup: true,
+      });
+      disablePromise = result.current.autoSaveSettings({
+        launchOnStartup: false,
+      });
+      await Promise.resolve();
+    });
+
+    expect(setAutoLaunchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      firstAutoLaunchWrite.resolve();
+      await Promise.all([enablePromise, disablePromise]);
+    });
+
+    expect(setAutoLaunchMock).toHaveBeenNthCalledWith(1, true);
+    expect(setAutoLaunchMock).toHaveBeenNthCalledWith(2, false);
+    expect(callOrder).toEqual([
+      "setAutoLaunch:true",
+      "saveSettings:true",
+      "setAutoLaunch:false",
+      "saveSettings:false",
+    ]);
+  });
+
+  it("does not persist launchOnStartup when OS auto-launch update fails", async () => {
+    serverSettings = {
+      ...serverSettings,
+      launchOnStartup: false,
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: serverSettings,
+      isLoading: false,
+    });
+    settingsFormMock = createSettingsFormMock({
+      settings: {
+        ...serverSettings,
+        launchOnStartup: false,
+      },
+    });
+    setAutoLaunchMock.mockRejectedValueOnce(new Error("launchagent failed"));
+
+    const { result } = renderHook(() => useSettings());
+
+    await expect(
+      act(async () => {
+        await result.current.autoSaveSettings({ launchOnStartup: true });
+      }),
+    ).rejects.toThrow("launchagent failed");
+
+    expect(mutateAsyncMock).not.toHaveBeenCalled();
+  });
+
+  it("rolls back OS auto-launch when settings persistence fails after OS update", async () => {
+    serverSettings = {
+      ...serverSettings,
+      launchOnStartup: false,
+    };
+    useSettingsQueryMock.mockReturnValue({
+      data: serverSettings,
+      isLoading: false,
+    });
+    settingsFormMock = createSettingsFormMock({
+      settings: {
+        ...serverSettings,
+        launchOnStartup: false,
+      },
+    });
+    mutateAsyncMock.mockRejectedValueOnce(new Error("save failed"));
+
+    const { result } = renderHook(() => useSettings());
+
+    let caughtError: unknown;
+    await act(async () => {
+      try {
+        await result.current.autoSaveSettings({ launchOnStartup: true });
+      } catch (error) {
+        caughtError = error;
+      }
+    });
+
+    expect(caughtError).toEqual(new Error("save failed"));
+    expect(setAutoLaunchMock).toHaveBeenNthCalledWith(1, true);
+    expect(setAutoLaunchMock).toHaveBeenNthCalledWith(2, false);
   });
 
   it("shows toast when Claude plugin sync fails but continues flow", async () => {
@@ -420,7 +591,9 @@ describe("useSettings hook", () => {
     });
 
     // 修复生效：读的是缓存实时值 true，payload=false，差异触发 clear_claude_config
-    expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({ official: true });
+    expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({
+      official: true,
+    });
     expect(syncCurrentProvidersLiveMock).toHaveBeenCalled();
   });
 

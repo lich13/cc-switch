@@ -687,6 +687,37 @@ impl ProxyService {
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
         let app_type_str = app.as_str();
 
+        if matches!(app, AppType::Codex)
+            && enabled
+            && self.should_skip_live_restore_for_app(&app).await
+        {
+            if !self.is_running().await {
+                self.start().await?;
+            }
+
+            let mut current_config = self
+                .db
+                .get_proxy_config_for_app(app_type_str)
+                .await
+                .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
+            if current_config.enabled {
+                current_config.enabled = false;
+                self.db
+                    .update_proxy_config_for_app(current_config)
+                    .await
+                    .map_err(|e| format!("清除 {app_type_str} 文件接管状态失败: {e}"))?;
+            }
+            self.db
+                .delete_live_backup(app_type_str)
+                .await
+                .map_err(|e| format!("清理 {app_type_str} Live 备份失败: {e}"))?;
+
+            log::info!(
+                "Codex pure local route is active; ignoring file takeover request without touching live config"
+            );
+            return Ok(());
+        }
+
         if enabled {
             // 1) 代理服务未运行则自动启动
             if !self.is_running().await {
@@ -1090,9 +1121,13 @@ impl ProxyService {
                 .await?;
         }
 
-        if let Ok(live_config) = self.read_codex_live() {
-            self.sync_live_config_to_provider(&AppType::Codex, &live_config)
-                .await?;
+        if !self.should_skip_live_restore_for_app(&AppType::Codex).await {
+            if let Ok(live_config) = self.read_codex_live() {
+                self.sync_live_config_to_provider(&AppType::Codex, &live_config)
+                    .await?;
+            }
+        } else {
+            log::info!("Codex pure local route is active; skipping Codex live token sync");
         }
 
         if let Ok(live_config) = self.read_gemini_live() {
@@ -1229,13 +1264,15 @@ impl ProxyService {
         }
 
         // Codex
-        if let Ok(config) = self.read_codex_live() {
-            let json_str = serde_json::to_string(&config)
-                .map_err(|e| format!("序列化 Codex 配置失败: {e}"))?;
-            self.db
-                .save_live_backup("codex", &json_str)
-                .await
-                .map_err(|e| format!("备份 Codex 配置失败: {e}"))?;
+        if !self.should_skip_live_restore_for_app(&AppType::Codex).await {
+            if let Ok(config) = self.read_codex_live() {
+                let json_str = serde_json::to_string(&config)
+                    .map_err(|e| format!("序列化 Codex 配置失败: {e}"))?;
+                self.db
+                    .save_live_backup("codex", &json_str)
+                    .await
+                    .map_err(|e| format!("备份 Codex 配置失败: {e}"))?;
+            }
         }
 
         // Gemini
@@ -1279,6 +1316,14 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取代理配置失败: {e}"))?;
 
+        let mut listen_port = config.listen_port;
+        if let Some(server) = self.server.read().await.as_ref() {
+            let status = server.get_status().await;
+            if status.running && status.port != 0 {
+                listen_port = status.port;
+            }
+        }
+
         // listen_address 可能是 0.0.0.0（用于监听所有网卡），但客户端无法用 0.0.0.0 连接；
         // 因此写回到各应用配置时，优先使用本机回环地址。
         let connect_host = match config.listen_address.as_str() {
@@ -1292,7 +1337,7 @@ impl ProxyService {
             connect_host
         };
 
-        let proxy_origin = format!("http://{}:{}", connect_host_for_url, config.listen_port);
+        let proxy_origin = format!("http://{}:{}", connect_host_for_url, listen_port);
         let proxy_url = proxy_origin.clone();
         let proxy_codex_base_url = format!("{}/v1", proxy_origin.trim_end_matches('/'));
 
@@ -1324,34 +1369,36 @@ impl ProxyService {
         }
 
         // Codex: 修改 config.toml 的 base_url，auth.json 的 OPENAI_API_KEY（代理会注入真实 Token）
-        if let Ok(mut live_config) = self.read_codex_live() {
-            // 1. 修改 auth.json 中的 OPENAI_API_KEY（使用占位符）
-            if let Some(auth) = live_config.get_mut("auth").and_then(|v| v.as_object_mut()) {
-                auth.insert("OPENAI_API_KEY".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
+        if !self.should_skip_live_restore_for_app(&AppType::Codex).await {
+            if let Ok(mut live_config) = self.read_codex_live() {
+                // 1. 修改 auth.json 中的 OPENAI_API_KEY（使用占位符）
+                if let Some(auth) = live_config.get_mut("auth").and_then(|v| v.as_object_mut()) {
+                    auth.insert("OPENAI_API_KEY".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
+                }
+
+                // 2. 修改 config.toml 中的 base_url
+                let config_str = live_config
+                    .get("config")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let codex_provider = self
+                    .get_current_provider_for_app(&AppType::Codex)
+                    .ok()
+                    .flatten();
+                let updated_config = Self::apply_codex_proxy_toml_config_for_provider(
+                    config_str,
+                    &proxy_codex_base_url,
+                    codex_provider.as_ref(),
+                );
+                live_config["config"] = json!(updated_config);
+                Self::attach_codex_model_catalog_from_provider(
+                    &mut live_config,
+                    codex_provider.as_ref(),
+                );
+
+                self.write_codex_live_for_provider(&live_config, codex_provider.as_ref())?;
+                log::info!("Codex Live 配置已接管，代理地址: {proxy_codex_base_url}");
             }
-
-            // 2. 修改 config.toml 中的 base_url
-            let config_str = live_config
-                .get("config")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let codex_provider = self
-                .get_current_provider_for_app(&AppType::Codex)
-                .ok()
-                .flatten();
-            let updated_config = Self::apply_codex_proxy_toml_config_for_provider(
-                config_str,
-                &proxy_codex_base_url,
-                codex_provider.as_ref(),
-            );
-            live_config["config"] = json!(updated_config);
-            Self::attach_codex_model_catalog_from_provider(
-                &mut live_config,
-                codex_provider.as_ref(),
-            );
-
-            self.write_codex_live_for_provider(&live_config, codex_provider.as_ref())?;
-            log::info!("Codex Live 配置已接管，代理地址: {proxy_codex_base_url}");
         }
 
         // Gemini: 修改 GOOGLE_GEMINI_BASE_URL，使用占位符替代真实 Token（代理会注入真实 Token）
@@ -1656,6 +1703,15 @@ impl ProxyService {
                 Ok(config) => Self::is_claude_live_taken_over(&config),
                 Err(_) => false,
             },
+            AppType::Codex
+                if self
+                    .db
+                    .get_proxy_routing_mode_for_app_sync(app_type.as_str())
+                    .map(|mode| mode == ProxyRoutingMode::LocalOnly)
+                    .unwrap_or(false) =>
+            {
+                false
+            }
             AppType::Codex => match self.read_codex_live() {
                 Ok(config) => Self::is_codex_live_taken_over(&config),
                 Err(_) => false,
@@ -2032,13 +2088,6 @@ impl ProxyService {
                 .as_deref()
                 != Some(provider_id);
 
-        let has_backup = self
-            .db
-            .get_live_backup(app_type_enum.as_str())
-            .await
-            .map_err(|e| format!("读取 {app_type} 备份失败: {e}"))?
-            .is_some();
-        let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
         let codex_local_only = matches!(app_type_enum, AppType::Codex)
             && self
                 .db
@@ -2046,6 +2095,17 @@ impl ProxyService {
                 .await
                 .map(|mode| mode == ProxyRoutingMode::LocalOnly)
                 .unwrap_or(false);
+        let has_backup = self
+            .db
+            .get_live_backup(app_type_enum.as_str())
+            .await
+            .map_err(|e| format!("读取 {app_type} 备份失败: {e}"))?
+            .is_some();
+        let live_taken_over = if codex_local_only {
+            false
+        } else {
+            self.detect_takeover_in_live_config_for_app(&app_type_enum)
+        };
         let should_sync_backup = !codex_local_only && (has_backup || live_taken_over);
 
         self.db

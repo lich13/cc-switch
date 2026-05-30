@@ -43,6 +43,7 @@ import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useProxyRoutingMode } from "@/lib/query/proxy";
 import { useAutoCompact } from "@/hooks/useAutoCompact";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
@@ -255,6 +256,10 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const isCurrentAppTakeoverActive = takeoverStatus?.[activeApp] || false;
+  const { data: activeAppRoutingMode } = useProxyRoutingMode(activeApp);
+  const isCurrentAppRouteActive =
+    isCurrentAppTakeoverActive ||
+    (activeApp === "codex" && activeAppRoutingMode === "local_only");
   const activeProviderId = useMemo(() => {
     const target = proxyStatus?.active_targets?.find(
       (t) => t.app_type === activeApp,
@@ -293,11 +298,7 @@ function App() {
     deleteProvider,
     saveUsageScript,
     setAsDefaultModel,
-  } = useProviderActions(
-    activeApp,
-    isProxyRunning,
-    isProxyRunning && isCurrentAppTakeoverActive,
-  );
+  } = useProviderActions(activeApp, isProxyRunning, isCurrentAppRouteActive);
 
   const disableOmoMutation = useDisableCurrentOmo();
   const handleDisableOmo = () => {
@@ -936,9 +937,7 @@ function App() {
                       appId={activeApp}
                       isLoading={isLoading}
                       isProxyRunning={isProxyRunning}
-                      isProxyTakeover={
-                        isProxyRunning && isCurrentAppTakeoverActive
-                      }
+                      isProxyTakeover={isCurrentAppRouteActive}
                       activeProviderId={activeProviderId}
                       onSwitch={switchProvider}
                       onEdit={(provider) => {
@@ -1176,7 +1175,7 @@ function App() {
                     setCurrentView("settings");
                   }}
                 />
-                {isCurrentAppTakeoverActive && (
+                {isCurrentAppRouteActive && (
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1541,7 +1540,7 @@ function App() {
         }}
         onSubmit={handleEditProvider}
         appId={activeApp}
-        isProxyTakeover={isProxyRunning && isCurrentAppTakeoverActive}
+        isProxyTakeover={isCurrentAppRouteActive}
       />
 
       {effectiveUsageProvider && (

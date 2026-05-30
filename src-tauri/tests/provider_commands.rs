@@ -235,6 +235,80 @@ fn codex_startup_import_skips_when_only_official_seed_exists() {
 }
 
 #[test]
+fn codex_startup_import_skips_when_local_only_active_even_if_empty() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let auth = json!({"OPENAI_API_KEY": "live-file-must-not-be-imported"});
+    let config = r#"model_provider = "live"
+[model_providers.live]
+base_url = "https://live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&auth, Some(config)).expect("seed codex live config");
+
+    let state = create_test_state().expect("create test state");
+    futures::executor::block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("enable codex local-only route");
+
+    assert!(
+        !ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
+            .expect("check startup import eligibility"),
+        "Codex local-only route must block startup live imports even when the provider table is empty"
+    );
+    assert!(
+        !import_default_config_test_hook(&state, AppType::Codex)
+            .expect("manual default import should be a no-op while local-only is active"),
+        "local-only default import should not read Codex live files into the provider DB"
+    );
+    assert!(
+        state
+            .db
+            .get_all_providers(AppType::Codex.as_str())
+            .expect("read codex providers")
+            .is_empty(),
+        "Codex live config should not create a default provider while local-only is active"
+    );
+}
+
+#[test]
+fn codex_live_settings_read_is_blocked_when_local_only_active() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let auth = json!({"OPENAI_API_KEY": "live-file-must-not-fill-edit-form"});
+    let config = r#"model_provider = "live"
+[model_providers.live]
+base_url = "https://live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&auth, Some(config)).expect("seed codex live config");
+
+    let state = create_test_state().expect("create test state");
+    futures::executor::block_on(
+        state
+            .db
+            .set_proxy_routing_mode_for_app("codex", cc_switch_lib::ProxyRoutingMode::LocalOnly),
+    )
+    .expect("enable codex local-only route");
+
+    let err = ProviderService::read_live_settings_for_ui(&state, AppType::Codex)
+        .expect_err("local-only mode should block UI reads from Codex live files");
+    assert!(
+        err.to_string().contains("pure routing") || err.to_string().contains("纯路由"),
+        "error should explain that pure routing blocks Codex live reads, got: {err}"
+    );
+}
+
+#[test]
 fn switch_provider_updates_codex_live_and_state() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -64,6 +64,8 @@ export function useSettings(): UseSettingsResult {
   const { data } = useSettingsQuery();
   const saveMutation = useSaveSettingsMutation();
   const queryClient = useQueryClient();
+  const settingsPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const knownAutoLaunchRef = useRef<boolean | undefined>(undefined);
 
   // 1️⃣ 表单状态管理
   const {
@@ -176,6 +178,67 @@ export function useSettings(): UseSettingsResult {
     [t],
   );
 
+  const persistSettingsWithAutoLaunch = useCallback(
+    async (payload: Settings) => {
+      const persist = async () => {
+        const previousSettings =
+          queryClient.getQueryData<Settings>(["settings"]) ?? data;
+        const nextAutoLaunch = payload.launchOnStartup;
+        const previousAutoLaunch =
+          knownAutoLaunchRef.current ??
+          previousSettings?.launchOnStartup ??
+          false;
+        const shouldSyncAutoLaunch =
+          nextAutoLaunch !== undefined && nextAutoLaunch !== previousAutoLaunch;
+
+        let autoLaunchUpdated = false;
+        try {
+          if (shouldSyncAutoLaunch) {
+            await settingsApi.setAutoLaunch(nextAutoLaunch);
+            knownAutoLaunchRef.current = nextAutoLaunch;
+            autoLaunchUpdated = true;
+          }
+
+          await saveMutation.mutateAsync(payload);
+
+          if (nextAutoLaunch !== undefined) {
+            knownAutoLaunchRef.current = nextAutoLaunch;
+          }
+        } catch (error) {
+          if (autoLaunchUpdated) {
+            try {
+              await settingsApi.setAutoLaunch(previousAutoLaunch);
+              knownAutoLaunchRef.current = previousAutoLaunch;
+            } catch (rollbackError) {
+              knownAutoLaunchRef.current = nextAutoLaunch;
+              console.error(
+                "[useSettings] Failed to rollback auto-launch after settings save failure",
+                rollbackError,
+              );
+              toast.error(
+                t("settings.autoLaunchRollbackFailed", {
+                  defaultValue: "开机自启回滚失败，请重新检查设置状态",
+                }),
+              );
+            }
+          }
+
+          throw error;
+        }
+      };
+
+      const queued = settingsPersistenceQueueRef.current
+        .catch(() => undefined)
+        .then(persist);
+      settingsPersistenceQueueRef.current = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      return queued;
+    },
+    [data, queryClient, saveMutation, t],
+  );
+
   // 即时保存设置（用于 General 标签页的实时更新）
   // 保存基础配置 + 独立的系统 API 调用（开机自启）
   const autoSaveSettings = useCallback(
@@ -212,25 +275,7 @@ export function useSettings(): UseSettingsResult {
           "settings",
         ])?.enableClaudePluginIntegration;
 
-        // 保存到配置文件
-        await saveMutation.mutateAsync(payload);
-
-        // 如果开机自启状态改变，调用系统 API
-        if (
-          payload.launchOnStartup !== undefined &&
-          payload.launchOnStartup !== data?.launchOnStartup
-        ) {
-          try {
-            await settingsApi.setAutoLaunch(payload.launchOnStartup);
-          } catch (error) {
-            console.error("Failed to update auto-launch:", error);
-            toast.error(
-              t("settings.autoLaunchFailed", {
-                defaultValue: "设置开机自启失败",
-              }),
-            );
-          }
-        }
+        await persistSettingsWithAutoLaunch(payload);
 
         // Claude Code 初次安装确认：开=写入 hasCompletedOnboarding=true；关=删除该字段
         // 仅在本次更新包含 skipClaudeOnboarding 时触发，避免其它自动保存误触发
@@ -298,7 +343,14 @@ export function useSettings(): UseSettingsResult {
         throw error;
       }
     },
-    [data, queryClient, saveMutation, settings, syncClaudePluginIfChanged, t],
+    [
+      data,
+      persistSettingsWithAutoLaunch,
+      queryClient,
+      settings,
+      syncClaudePluginIfChanged,
+      t,
+    ],
   );
 
   // 完整保存设置（用于 Advanced 标签页的手动保存）
@@ -346,26 +398,9 @@ export function useSettings(): UseSettingsResult {
           "settings",
         ])?.enableClaudePluginIntegration;
 
-        await saveMutation.mutateAsync(payload);
+        await persistSettingsWithAutoLaunch(payload);
 
         await settingsApi.setAppConfigDirOverride(sanitizedAppDir ?? null);
-
-        // 只在开机自启状态真正改变时调用系统 API
-        if (
-          payload.launchOnStartup !== undefined &&
-          payload.launchOnStartup !== data?.launchOnStartup
-        ) {
-          try {
-            await settingsApi.setAutoLaunch(payload.launchOnStartup);
-          } catch (error) {
-            console.error("Failed to update auto-launch:", error);
-            toast.error(
-              t("settings.autoLaunchFailed", {
-                defaultValue: "设置开机自启失败",
-              }),
-            );
-          }
-        }
 
         // Claude Code 初次安装确认：开=写入 hasCompletedOnboarding=true；关=删除该字段
         const prevSkipClaudeOnboarding = data?.skipClaudeOnboarding ?? false;
@@ -468,8 +503,8 @@ export function useSettings(): UseSettingsResult {
       appConfigDir,
       data,
       initialAppConfigDir,
+      persistSettingsWithAutoLaunch,
       queryClient,
-      saveMutation,
       settings,
       setRequiresRestart,
       syncClaudePluginIfChanged,

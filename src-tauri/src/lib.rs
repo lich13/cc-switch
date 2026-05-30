@@ -70,6 +70,16 @@ use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
+#[cfg(any(target_os = "macos", test))]
+fn should_ignore_macos_startup_duplicate_instance(args: &[String]) -> bool {
+    if args.iter().any(|arg| arg.starts_with("ccswitch://")) {
+        return false;
+    }
+
+    args.iter()
+        .any(|arg| crate::auto_launch::is_macos_launch_agent_startup_arg(arg))
+}
+
 fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
         Ok(url) => {
@@ -215,6 +225,16 @@ pub fn run() {
             log::debug!("Args count: {}", args.len());
             for (i, arg) in args.iter().enumerate() {
                 log::debug!("  arg[{i}]: {}", redact_url_for_log(arg));
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                if should_ignore_macos_startup_duplicate_instance(&args) {
+                    log::info!(
+                        "忽略带 LaunchAgent 启动标记的 macOS 重复实例，保持静默启动"
+                    );
+                    return;
+                }
             }
 
             if crate::lightweight::is_lightweight_mode() {
@@ -431,6 +451,12 @@ pub fn run() {
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
+
+            if crate::settings::get_settings().launch_on_startup {
+                if let Err(e) = crate::auto_launch::repair_auto_launch_for_current_app() {
+                    log::warn!("修复开机自启配置失败: {e}");
+                }
+            }
 
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
@@ -1663,6 +1689,19 @@ fn initialize_common_config_snippets(state: &store::AppState) {
     // This must run before proxy takeover is restored on startup, otherwise we'd read
     // proxy-placeholder configs instead of the user's actual live settings.
     for app_type in crate::app_config::AppType::all() {
+        if matches!(app_type, crate::app_config::AppType::Codex)
+            && futures::executor::block_on(
+                state.db.get_proxy_routing_mode_for_app(app_type.as_str()),
+            )
+            .ok()
+                == Some(ProxyRoutingMode::LocalOnly)
+        {
+            log::info!(
+                "Codex pure local route is active; skipping startup common config extraction"
+            );
+            continue;
+        }
+
         if !state
             .db
             .should_auto_extract_config_snippet(app_type.as_str())
@@ -1881,5 +1920,102 @@ pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
         log::error!("退出前保存窗口状态失败: {err}");
     } else {
         log::info!("已在退出前保存窗口状态");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn with_test_home<T>(test: impl FnOnce(&store::AppState) -> T) -> T {
+        let temp = tempfile::tempdir().expect("create temp test home");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+
+        let db = Arc::new(Database::memory().expect("create in-memory database"));
+        let state = store::AppState::new(db);
+        let result = test(&state);
+
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        result
+    }
+
+    #[test]
+    fn macos_startup_duplicate_suppression_ignores_launch_agent_arg() {
+        let args = vec![
+            "CC Switch Pure Route".to_string(),
+            crate::auto_launch::MACOS_LAUNCH_AGENT_STARTUP_ARG.to_string(),
+        ];
+
+        assert!(should_ignore_macos_startup_duplicate_instance(&args));
+    }
+
+    #[test]
+    fn macos_startup_duplicate_suppression_preserves_deeplink() {
+        let args = vec![
+            "CC Switch Pure Route".to_string(),
+            "ccswitch://import?resource=provider".to_string(),
+            crate::auto_launch::MACOS_LAUNCH_AGENT_STARTUP_ARG.to_string(),
+        ];
+
+        assert!(!should_ignore_macos_startup_duplicate_instance(&args));
+    }
+
+    #[test]
+    fn macos_startup_duplicate_suppression_allows_plain_relaunches() {
+        let args = vec!["CC Switch Pure Route".to_string()];
+
+        assert!(!should_ignore_macos_startup_duplicate_instance(&args));
+    }
+
+    #[test]
+    fn startup_common_config_extract_skips_codex_when_local_only_active() {
+        with_test_home(|state| {
+            let auth = json!({"OPENAI_API_KEY": "live-file-must-not-be-read"});
+            let config = r#"model_provider = "live"
+model = "gpt-5.4"
+disable_response_storage = true
+
+[model_providers.live]
+name = "Live Provider"
+base_url = "https://live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[mcp_servers.live_server]
+type = "stdio"
+command = "echo"
+"#;
+            crate::codex_config::write_codex_live_atomic(&auth, Some(config))
+                .expect("seed codex live config");
+            futures::executor::block_on(
+                state
+                    .db
+                    .set_proxy_routing_mode_for_app("codex", ProxyRoutingMode::LocalOnly),
+            )
+            .expect("enable codex local-only route");
+
+            initialize_common_config_snippets(state);
+
+            assert!(
+                state
+                    .db
+                    .get_config_snippet(AppType::Codex.as_str())
+                    .expect("read codex common config snippet")
+                    .is_none(),
+                "startup common config extraction must not read Codex live config while local-only is active"
+            );
+        });
     }
 }

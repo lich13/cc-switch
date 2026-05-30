@@ -2,7 +2,9 @@ import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { http, HttpResponse } from "msw";
 import { providersApi } from "@/lib/api/providers";
+import { server } from "../msw/server";
 import {
   resetProviderState,
   setCurrentProviderId,
@@ -75,9 +77,16 @@ vi.mock("@/components/providers/AddProviderDialog", () => ({
 }));
 
 vi.mock("@/components/providers/EditProviderDialog", () => ({
-  EditProviderDialog: ({ open, provider, onSubmit, onOpenChange }: any) =>
+  EditProviderDialog: ({
+    open,
+    provider,
+    onSubmit,
+    onOpenChange,
+    isProxyTakeover,
+  }: any) =>
     open ? (
       <div data-testid="edit-provider-dialog">
+        <span data-testid="edit-proxy-takeover">{String(isProxyTakeover)}</span>
         <button
           onClick={() =>
             onSubmit({
@@ -244,6 +253,50 @@ describe("App integration with MSW", () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalled();
     });
+  });
+
+  it("shows usage statistics entry when Codex pure local route is active", async () => {
+    server.use(
+      http.post("http://tauri.local/get_proxy_routing_mode_for_app", () =>
+        HttpResponse.json("local_only"),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+
+    expect(screen.getByTitle("使用统计")).toBeInTheDocument();
+  });
+
+  it("treats Codex pure local route as route-active when editing the current provider", async () => {
+    server.use(
+      http.post("http://tauri.local/get_proxy_routing_mode_for_app", () =>
+        HttpResponse.json("local_only"),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("edit"));
+
+    expect(screen.getByTestId("edit-proxy-takeover")).toHaveTextContent("true");
   });
 
   it("duplicates openclaw providers with a generated key that avoids live-only ids", async () => {
