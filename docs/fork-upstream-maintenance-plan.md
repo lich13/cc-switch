@@ -1,10 +1,10 @@
-# CC Switch Pure Route Fork Execution Plan
+# CC Switch Pure Route Fork Maintenance Plan
 
-> **For agentic workers:** this document is both the implementation plan and the handoff record for the `lich13/cc-switch` fork. Keep it current when changing routing, upstream-sync, or release behavior.
+> **For agentic workers:** this document is the maintenance handoff record for the `lich13/cc-switch` fork. Keep it current when changing routing, upstream-sync, crash-repair, or release behavior.
 
-**Goal:** Build a customized CC Switch fork that adds a no-write Codex local routing mode, while keeping the fork able to follow `farion1231/cc-switch` through automated upstream-sync pull requests.
+**Current Goal:** Maintain a customized CC Switch fork that tracks upstream release tags while preserving Codex pure local routing, the fork updater/release chain, and the vendored macOS `muda` zero-dimension icon crash fix.
 
-**Architecture:** Keep official `farion1231/cc-switch` as a read-only `upstream` remote and use the user's fork as `origin`. Implement the Codex customization as a small, isolated feature layer: a backend routing mode, a Codex-only route control, and write guards that prevent `~/.codex/auth.json` and `~/.codex/config.toml` mutation while pure routing is active.
+**Architecture:** Keep official `farion1231/cc-switch` as a read-only `upstream` remote and use the user's fork as `origin`. Preserve fork customization as isolated feature layers: backend routing mode, Codex-only route control, write guards that prevent `~/.codex/auth.json` and `~/.codex/config.toml` mutation while pure routing is active, and a local patched `muda 0.17.1` crate for macOS menu/tray icon safety.
 
 **Tech Stack:** Tauri 2, Rust 1.85+, React 18, TypeScript, TanStack Query, pnpm, GitHub Actions, GitHub CLI.
 
@@ -12,33 +12,36 @@
 
 ## Chinese Execution Summary
 
-这份方案按“先建可持续 fork，再做纯路由功能，最后接入上游自动同步”的顺序执行。
+这份文档记录当前 fork 的维护边界和发布检查点。
 
 - 远端拓扑：把官方仓库改成只读 `upstream`，把用户自己的 fork 设为可写 `origin`。
 - 纯路由边界：Codex 只有通过生成的 `codex -c` 启动命令进入 CC Switch 本地代理；这个模式不透明劫持已有 Codex 进程，也不写 `~/.codex/auth.json` 或 `~/.codex/config.toml`。
-- 功能实现：新增 `local_only` 路由模式、Codex 专用按钮、运行时启动命令展示、服务层写入保护、前后端测试。
+- 功能实现：保留 `local_only` 路由模式、Codex 专用按钮、运行时启动命令展示、服务层写入保护、前后端测试。
+- 崩溃修复：保留 `src-tauri/vendor/muda-0.17.1` 的 macOS 零宽/零高图标透明 `1x1` 归一化补丁。
 - 自动跟随官方：新增 `.github/workflows/upstream-sync.yml`，每天从 `farion1231/cc-switch` 合并到 fork 的同步分支，创建/更新 PR，并在同一 workflow 中跑 CI 等价检查。
-- 发布风险：如果发布 fork 安装包，必须改 Tauri `identifier`、updater endpoint 和签名 key，否则自定义安装包可能被官方 updater 覆盖回官方版本。
+- 发布风险：发布 fork 安装包时必须保持 fork Tauri `identifier`、updater endpoint、version 转换规则和签名 key，否则自定义安装包可能被官方 updater 覆盖回官方版本。
 
 ## 0. Current Repo Facts
 
-Verified on this workspace:
+Verified on this workspace for the v3.16.0 fork release:
 
-- Local repo: `/Users/gosu/Documents/cc-switch`.
-- Current work branch: `codex/pure-local-routing-sync`.
+- Local repo: `/Users/gosu/Documents/程序开发/cc-switch`.
+- Current release branch: `upgrade/v3.16.0-lich13.9`.
+- Stable branch: `main`.
 - Current remote `origin`: `https://github.com/lich13/cc-switch.git`.
 - Current remote `upstream`: `https://github.com/farion1231/cc-switch.git`.
 - `upstream` push URL is disabled.
-- Implementation branch includes upstream `0fb7fd12` (`feat: add Xiaomi MiMo Token Plan presets (#2803)`) merged from `farion1231/cc-switch@main`.
-- Official latest release checked during implementation: `v3.15.0`, published `2026-05-16T03:42:43Z`.
-- Existing CI: `.github/workflows/ci.yml`.
+- Current upstream release baseline: `farion1231/cc-switch v3.16.0`, commit `47232cb05dc0527f56bc4dc1d61b075ad83eeefe`.
+- Current fork release target: GitHub tag `v3.16.0-lich13.9`, app version `3.16.0-9`.
 - Existing release workflow: `.github/workflows/release.yml`.
 - `.gitignore` no longer ignores `.github`; fork workflows are intended to be tracked normally.
-- Fork app version is `3.15.0-lich13.1`.
+- Fork app version is `3.16.0-9`.
 - Fork product identity is `CC Switch Pure Route` / `com.lich13.ccswitch`.
 - Tauri updater endpoint points at `https://github.com/lich13/cc-switch/releases/latest/download/latest.json`.
-- Fork-specific Tauri updater signing secrets are set in `lich13/cc-switch`: `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-- Apple signing/notarization secrets are not present. The release workflow packages unsigned macOS artifacts when those secrets are missing.
+- Release workflow converts tags like `v3.16.0-lich13.9` into updater version `3.16.0-9` in `latest.json`.
+- Fork-specific Tauri updater signing requires `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+- Apple signing/notarization secrets are optional. The release workflow packages unsigned macOS artifacts when those secrets are missing.
+- `src-tauri/Cargo.toml` patches `muda` to `vendor/muda-0.17.1`; do not remove this patch during upstream syncs without replacing the zero-dimension icon fix.
 
 Stop immediately if:
 
@@ -56,14 +59,11 @@ Use this remote layout:
 The local setup command sequence is:
 
 ```bash
-cd /Users/gosu/Documents/cc-switch
+cd /Users/gosu/Documents/程序开发/cc-switch
 
-git remote rename origin upstream
 git remote set-url --push upstream DISABLED
-git remote add origin "$FORK_REPO_URL"
 
 git fetch --all --prune --tags
-git push -u origin main
 git branch --set-upstream-to=origin/main main
 
 git config rerere.enabled true
@@ -110,7 +110,7 @@ Expected:
 Use these branches:
 
 - `main`: stable customized fork.
-- `codex/pure-local-routing-sync`: implementation branch for the no-write Codex routing feature and release configuration.
+- `upgrade/v3.16.0-lich13.N`: temporary release-upgrade branches.
 - `chore/sync-upstream`: recurring upstream sync branch created by GitHub Actions.
 
 Rules:
@@ -266,7 +266,7 @@ The guard belongs at service/command boundaries that have access to `AppState` o
   - Skips Apple notarization checks unless Apple secrets are configured.
 
 - `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.lock`
-  - Fork version and updater identity are pinned to `3.15.0-lich13.1`.
+  - Fork version and updater identity are pinned to the active fork release version, currently `3.16.0-9` for tag `v3.16.0-lich13.9`.
 
 - `src/i18n/locales/en.json`
 - `src/i18n/locales/zh.json`
@@ -284,7 +284,7 @@ The guard belongs at service/command boundaries that have access to `AppState` o
 Run:
 
 ```bash
-cd /Users/gosu/Documents/cc-switch
+cd /Users/gosu/Documents/程序开发/cc-switch
 git status --short --branch
 git remote -v
 GITHUB_OWNER="$(gh api user --jq .login)"
@@ -301,7 +301,7 @@ Expected: clean tree before remote rewiring.
 Run:
 
 ```bash
-cd /Users/gosu/Documents/cc-switch
+cd /Users/gosu/Documents/程序开发/cc-switch
 git remote rename origin upstream
 git remote set-url --push upstream DISABLED
 git remote add origin "$FORK_REPO_URL"
@@ -796,7 +796,7 @@ When the upstream sync workflow fails due to conflicts:
 - [ ] Pull the sync branch locally.
 
 ```bash
-cd /Users/gosu/Documents/cc-switch
+cd /Users/gosu/Documents/程序开发/cc-switch
 git fetch upstream --prune
 git fetch origin --prune
 git checkout main
@@ -908,7 +908,7 @@ Expected secrets include Tauri signing, Apple signing, notarization, and platfor
 Run this full local verification before merging feature and upstream sync PRs:
 
 ```bash
-cd /Users/gosu/Documents/cc-switch
+cd /Users/gosu/Documents/程序开发/cc-switch
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm format:check
