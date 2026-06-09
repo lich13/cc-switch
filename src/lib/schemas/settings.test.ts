@@ -19,9 +19,9 @@ describe("settingsSchema", () => {
   });
 
   it("defaults omitted disableImageGeneration to chat", () => {
-    expect(
-      settingsSchema.parse(baseSettings).disableImageGeneration,
-    ).toBe("chat");
+    expect(settingsSchema.parse(baseSettings).disableImageGeneration).toBe(
+      "chat",
+    );
   });
 
   it("defaults null and unknown disableImageGeneration to chat", () => {
