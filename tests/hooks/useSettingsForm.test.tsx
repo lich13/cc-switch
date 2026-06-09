@@ -51,7 +51,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
-    expect(settings.disableImageGeneration).toBe(false);
+    expect(settings.disableImageGeneration).toBe("chat");
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
@@ -120,7 +120,7 @@ describe("useSettingsForm Hook", () => {
     });
   });
 
-  it("should normalize null and unknown image generation disablement values to false", async () => {
+  it("should normalize null and unknown image generation disablement values to chat", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {
         showInTray: true,
@@ -137,7 +137,7 @@ describe("useSettingsForm Hook", () => {
     const { result, rerender } = renderHook(() => useSettingsForm());
 
     await waitFor(() => {
-      expect(result.current.settings?.disableImageGeneration).toBe(false);
+      expect(result.current.settings?.disableImageGeneration).toBe("chat");
     });
 
     useSettingsQueryMock.mockReturnValue({
@@ -156,7 +156,7 @@ describe("useSettingsForm Hook", () => {
     rerender();
 
     await waitFor(() => {
-      expect(result.current.settings?.disableImageGeneration).toBe(false);
+      expect(result.current.settings?.disableImageGeneration).toBe("chat");
     });
   });
 
@@ -280,7 +280,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
-    expect(settings.disableImageGeneration).toBe(false);
+    expect(settings.disableImageGeneration).toBe("chat");
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("zh");

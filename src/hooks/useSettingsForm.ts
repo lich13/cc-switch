@@ -55,7 +55,7 @@ const normalizeDisableImageGeneration = (
   value?: unknown,
 ): false | true | "chat" => {
   if (value === false || value === true || value === "chat") return value;
-  return false;
+  return "chat";
 };
 
 export interface UseSettingsFormResult {
@@ -150,7 +150,7 @@ export function useSettingsForm(): UseSettingsFormResult {
             useAppWindowControls: false,
             enableClaudePluginIntegration: false,
             skipClaudeOnboarding: false,
-            disableImageGeneration: false,
+            disableImageGeneration: "chat",
             language: readPersistedLanguage(),
           } as SettingsFormState);
 

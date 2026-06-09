@@ -103,13 +103,13 @@ const createSettings = (
   proxyConfirmed: true,
   failoverConfirmed: true,
   enableFailoverToggle: true,
-  disableImageGeneration: false,
+  disableImageGeneration: "chat",
   language: "zh",
   ...overrides,
 });
 
 describe("ProxyTabContent chat image generation controls", () => {
-  it("renders the toggle disabled by default in the rectifier section before the rectifier panel", () => {
+  it("renders the toggle enabled by default in the rectifier section before the rectifier panel", () => {
     render(
       <ProxyTabContent
         settings={createSettings()}
@@ -122,7 +122,7 @@ describe("ProxyTabContent chat image generation controls", () => {
       name: "settings.disableImageGenerationInChat",
     });
 
-    expect(toggle).not.toBeChecked();
+    expect(toggle).toBeChecked();
     expect(
       toggle.compareDocumentPosition(
         within(rectifierSection).getByTestId("rectifier-config-panel"),

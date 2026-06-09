@@ -18,9 +18,24 @@ describe("settingsSchema", () => {
     }
   });
 
-  it("allows disableImageGeneration to be omitted", () => {
+  it("defaults omitted disableImageGeneration to chat", () => {
     expect(
       settingsSchema.parse(baseSettings).disableImageGeneration,
-    ).toBeUndefined();
+    ).toBe("chat");
+  });
+
+  it("defaults null and unknown disableImageGeneration to chat", () => {
+    expect(
+      settingsSchema.parse({
+        ...baseSettings,
+        disableImageGeneration: null,
+      }).disableImageGeneration,
+    ).toBe("chat");
+    expect(
+      settingsSchema.parse({
+        ...baseSettings,
+        disableImageGeneration: "__invalid__",
+      }).disableImageGeneration,
+    ).toBe("chat");
   });
 });
