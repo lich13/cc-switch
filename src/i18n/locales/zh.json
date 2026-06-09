@@ -552,6 +552,8 @@
     "launchOnStartupDescription": "随系统启动自动运行 CC Switch",
     "silentStartup": "静默启动",
     "silentStartupDescription": "程序启动时不显示主窗口，仅在系统托盘运行",
+    "disableImageGenerationInChat": "聊天禁用图片生成",
+    "disableImageGenerationInChatDescription": "开启后，本地路由会移除聊天/Responses 请求中的 OpenAI 内建 image_generation 工具；图片接口不受影响。",
     "autoLaunchFailed": "设置开机自启失败",
     "minimizeToTray": "关闭时最小化到托盘",
     "minimizeToTrayDescription": "勾选后点击关闭按钮会隐藏到系统托盘，取消则直接退出应用。",

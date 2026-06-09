@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,6 +22,100 @@ pub struct CustomEndpoint {
 
 fn default_true() -> bool {
     true
+}
+
+/// OpenAI built-in image_generation disabling mode.
+///
+/// Matches CLIProxyAPI's tri-state JSON shape:
+/// false = off, true = all, "chat" = chat/responses only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisableImageGenerationMode {
+    #[default]
+    Off,
+    All,
+    Chat,
+}
+
+impl Serialize for DisableImageGenerationMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Off => serializer.serialize_bool(false),
+            Self::All => serializer.serialize_bool(true),
+            Self::Chat => serializer.serialize_str("chat"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DisableImageGenerationMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DisableImageGenerationModeVisitor)
+    }
+}
+
+struct DisableImageGenerationModeVisitor;
+
+impl<'de> Visitor<'de> for DisableImageGenerationModeVisitor {
+    type Value = DisableImageGenerationMode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a boolean or one of false, true, chat")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(if value {
+            DisableImageGenerationMode::All
+        } else {
+            DisableImageGenerationMode::Off
+        })
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        parse_disable_image_generation_mode(value).map_err(E::custom)
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_str(&value)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(DisableImageGenerationMode::Off)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(DisableImageGenerationMode::Off)
+    }
+}
+
+fn parse_disable_image_generation_mode(value: &str) -> Result<DisableImageGenerationMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "false" | "0" | "off" | "no" => Ok(DisableImageGenerationMode::Off),
+        "true" | "1" | "on" | "yes" => Ok(DisableImageGenerationMode::All),
+        "chat" => Ok(DisableImageGenerationMode::Chat),
+        other => Err(format!(
+            "invalid disableImageGeneration value {other:?} (allowed: true, false, chat)"
+        )),
+    }
 }
 
 /// 主页面显示的应用配置
@@ -238,6 +334,9 @@ pub struct AppSettings {
     /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
     #[serde(default)]
     pub silent_startup: bool,
+    /// OpenAI 内建 image_generation 工具禁用策略
+    #[serde(default)]
+    pub disable_image_generation: DisableImageGenerationMode,
     /// 是否在主页面启用本地代理功能（默认关闭）
     #[serde(default)]
     pub enable_local_proxy: bool,
@@ -361,6 +460,7 @@ impl Default for AppSettings {
             skip_claude_onboarding: false,
             launch_on_startup: false,
             silent_startup: false,
+            disable_image_generation: DisableImageGenerationMode::Off,
             enable_local_proxy: false,
             proxy_confirmed: None,
             usage_confirmed: None,
@@ -901,5 +1001,69 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn disable_image_generation_defaults_to_off() {
+        assert_eq!(
+            DisableImageGenerationMode::default(),
+            DisableImageGenerationMode::Off
+        );
+        assert_eq!(
+            AppSettings::default().disable_image_generation,
+            DisableImageGenerationMode::Off
+        );
+
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({}))
+            .expect("settings should deserialize with defaults");
+        assert_eq!(
+            settings.disable_image_generation,
+            DisableImageGenerationMode::Off
+        );
+    }
+
+    #[test]
+    fn disable_image_generation_accepts_bool_and_chat_string() {
+        for (raw, expected) in [
+            (serde_json::json!(false), DisableImageGenerationMode::Off),
+            (serde_json::json!(true), DisableImageGenerationMode::All),
+            (serde_json::json!("chat"), DisableImageGenerationMode::Chat),
+        ] {
+            let mode: DisableImageGenerationMode =
+                serde_json::from_value(raw).expect("mode should deserialize");
+            assert_eq!(mode, expected);
+        }
+    }
+
+    #[test]
+    fn app_settings_deserializes_disable_image_generation_bool_and_chat() {
+        for (raw, expected) in [
+            (serde_json::json!(false), DisableImageGenerationMode::Off),
+            (serde_json::json!(true), DisableImageGenerationMode::All),
+            (serde_json::json!("chat"), DisableImageGenerationMode::Chat),
+        ] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "disableImageGeneration": raw
+            }))
+            .expect("settings should deserialize");
+
+            assert_eq!(settings.disable_image_generation, expected);
+        }
+    }
+
+    #[test]
+    fn disable_image_generation_serializes_cli_proxy_api_shape() {
+        assert_eq!(
+            serde_json::to_value(DisableImageGenerationMode::Off).unwrap(),
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            serde_json::to_value(DisableImageGenerationMode::All).unwrap(),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            serde_json::to_value(DisableImageGenerationMode::Chat).unwrap(),
+            serde_json::json!("chat")
+        );
     }
 }

@@ -1,5 +1,12 @@
 import { useState } from "react";
-import { Server, Activity, Zap, Globe, ShieldAlert } from "lucide-react";
+import {
+  Server,
+  Activity,
+  Zap,
+  Globe,
+  ShieldAlert,
+  ImageOff,
+} from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
@@ -183,8 +190,7 @@ export function ProxyTabContent({
                   const routeActive =
                     (takeoverStatus?.[appType] ?? false) ||
                     (appType === "codex" && codexRoutingMode === "local_only");
-                  const failoverDisabled =
-                    !isRunning || !routeActive;
+                  const failoverDisabled = !isRunning || !routeActive;
                   return (
                     <TabsContent
                       key={appType}
@@ -238,7 +244,25 @@ export function ProxyTabContent({
             </div>
           </AccordionTrigger>
           <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-            <RectifierConfigPanel />
+            <div className="space-y-6">
+              <ToggleRow
+                icon={<ImageOff className="h-4 w-4 text-rose-500" />}
+                title={t("settings.disableImageGenerationInChat")}
+                description={t(
+                  "settings.disableImageGenerationInChatDescription",
+                )}
+                checked={
+                  settings.disableImageGeneration === "chat" ||
+                  settings.disableImageGeneration === true
+                }
+                onCheckedChange={(value) =>
+                  void onAutoSave({
+                    disableImageGeneration: value ? "chat" : false,
+                  })
+                }
+              />
+              <RectifierConfigPanel />
+            </div>
           </AccordionContent>
         </AccordionItem>
 

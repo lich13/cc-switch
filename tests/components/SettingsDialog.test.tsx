@@ -64,6 +64,7 @@ const createSettingsMock = (overrides: Partial<SettingsMock> = {}) => {
       showInTray: true,
       minimizeToTrayOnClose: true,
       enableClaudePluginIntegration: false,
+      disableImageGeneration: "chat",
       language: "zh",
       claudeConfigDir: "/claude",
       codexConfigDir: "/codex",
@@ -199,9 +200,31 @@ vi.mock("@/components/settings/ThemeSettings", () => ({
 
 vi.mock("@/components/settings/WindowSettings", () => ({
   WindowSettings: ({ onChange }: any) => (
-    <button onClick={() => onChange({ minimizeToTrayOnClose: false })}>
-      window-settings
-    </button>
+    <div>
+      <button onClick={() => onChange({ minimizeToTrayOnClose: false })}>
+        window-settings
+      </button>
+    </div>
+  ),
+}));
+
+vi.mock("@/components/settings/ProxyTabContent", () => ({
+  ProxyTabContent: ({ settings, onAutoSave }: any) => (
+    <div>
+      <span>
+        proxy-disable-image-generation:
+        {String(
+          settings.disableImageGeneration === "chat" ||
+            settings.disableImageGeneration === true,
+        )}
+      </span>
+      <button onClick={() => onAutoSave({ disableImageGeneration: "chat" })}>
+        proxy-enable-disable-image-generation
+      </button>
+      <button onClick={() => onAutoSave({ disableImageGeneration: false })}>
+        proxy-disable-disable-image-generation
+      </button>
+    </div>
   ),
 }));
 
@@ -338,15 +361,18 @@ describe("SettingsPage Component", () => {
       minimizeToTrayOnClose: false,
     });
 
+    fireEvent.click(screen.getByText("settings.tabProxy"));
+    expect(
+      screen.getByText("proxy-disable-image-generation:true"),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.cloudSync.title"));
     expect(screen.getByText("webdav-sync-section:none")).toBeInTheDocument();
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
 
     // 有文件时，点击导入按钮执行 importConfig
-    fireEvent.click(
-      screen.getByRole("button", { name: /settings\.import/ }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
     expect(importExportMock.importConfig).toHaveBeenCalled();
 
     fireEvent.click(
@@ -357,6 +383,29 @@ describe("SettingsPage Component", () => {
     // 清除选择按钮
     fireEvent.click(screen.getByRole("button", { name: "common.clear" }));
     expect(importExportMock.clearSelection).toHaveBeenCalled();
+  });
+
+  it("should auto-save chat image generation disablement toggle values", () => {
+    renderSettingsPage();
+
+    fireEvent.click(screen.getByText("settings.tabProxy"));
+    fireEvent.click(screen.getByText("proxy-enable-disable-image-generation"));
+
+    expect(settingsMock.updateSettings).toHaveBeenCalledWith({
+      disableImageGeneration: "chat",
+    });
+    expect(settingsMock.autoSaveSettings).toHaveBeenCalledWith({
+      disableImageGeneration: "chat",
+    });
+
+    fireEvent.click(screen.getByText("proxy-disable-disable-image-generation"));
+
+    expect(settingsMock.updateSettings).toHaveBeenLastCalledWith({
+      disableImageGeneration: false,
+    });
+    expect(settingsMock.autoSaveSettings).toHaveBeenLastCalledWith({
+      disableImageGeneration: false,
+    });
   });
 
   it("should pass onImportSuccess callback to useImportExport hook", async () => {

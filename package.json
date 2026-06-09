@@ -1,6 +1,6 @@
 {
   "name": "cc-switch",
-  "version": "3.16.0-9",
+  "version": "3.16.0-10",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "repository": "https://github.com/lich13/cc-switch",
   "type": "module",

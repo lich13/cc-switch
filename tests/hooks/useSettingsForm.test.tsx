@@ -51,11 +51,73 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.disableImageGeneration).toBe(false);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
     expect(result.current.initialLanguage).toBe("en");
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
+  });
+
+  it("should preserve chat image generation disablement when provided", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: "chat",
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe("chat");
+    });
+  });
+
+  it("should keep explicit image generation disablement values", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: false,
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe(false);
+    });
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: true,
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe(true);
+    });
   });
 
   it("should support japanese language preference from server data", async () => {
@@ -178,6 +240,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
+    expect(settings.disableImageGeneration).toBe(false);
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("zh");

@@ -1156,6 +1156,12 @@ impl RequestForwarder {
             adapter.build_url(&base_url, &effective_endpoint)
         };
 
+        let mapped_body = apply_disable_image_generation_policy_for_upstream(
+            mapped_body,
+            &effective_endpoint,
+            crate::settings::get_settings().disable_image_generation,
+        );
+
         // 转换请求体（如果需要）
         let request_body = if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
@@ -2319,6 +2325,18 @@ fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
 }
 
+fn apply_disable_image_generation_policy_for_upstream(
+    request_body: Value,
+    endpoint: &str,
+    mode: crate::settings::DisableImageGenerationMode,
+) -> Value {
+    super::image_generation_policy::apply_disable_image_generation_policy(
+        request_body,
+        endpoint,
+        mode,
+    )
+}
+
 fn log_prompt_cache_trace(
     app_type: &AppType,
     provider: &Provider,
@@ -2575,6 +2593,65 @@ mod tests {
             serde_json::to_string(&prepared).unwrap(),
             r#"{"a":2,"tools":[{"name":"lookup","parameters":{"properties":{"_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"number"}},"type":"object"}}],"z":1}"#
         );
+    }
+
+    #[test]
+    fn forwarder_upstream_policy_removes_image_generation_before_private_filter() {
+        let body = json!({
+            "_internal": "drop",
+            "model": "gpt-5.4",
+            "tools": [
+                {"type": "image_generation"},
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": {"type": "image_generation"}
+        });
+
+        let policy_body = apply_disable_image_generation_policy_for_upstream(
+            body,
+            "/v1/responses",
+            crate::settings::DisableImageGenerationMode::Chat,
+        );
+        let prepared = prepare_upstream_request_body(policy_body);
+
+        assert!(prepared.get("_internal").is_none());
+        assert_eq!(
+            prepared["tools"],
+            json!([
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+            ])
+        );
+        assert!(prepared.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn forwarder_policy_runs_before_codex_responses_to_chat_transform() {
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": "draw and explain",
+            "tools": [
+                {"type": "image_generation"},
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": {"type": "image_generation"}
+        });
+
+        let policy_body = apply_disable_image_generation_policy_for_upstream(
+            body,
+            "/chat/completions",
+            crate::settings::DisableImageGenerationMode::Chat,
+        );
+        let transformed = crate::proxy::providers::transform_codex_chat::
+            responses_to_chat_completions_with_reasoning(policy_body, None)
+                .expect("policy output should still transform to chat");
+
+        assert_eq!(
+            transformed["tools"],
+            json!([
+                {"type": "function", "function": {"name": "lookup", "description": null, "parameters": {"type": "object"}}}
+            ])
+        );
+        assert!(transformed.get("tool_choice").is_none());
     }
 
     #[tokio::test]

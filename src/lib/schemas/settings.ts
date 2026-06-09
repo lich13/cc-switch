@@ -14,6 +14,9 @@ export const settingsSchema = z.object({
   enableClaudePluginIntegration: z.boolean().optional(),
   skipClaudeOnboarding: z.boolean().optional(),
   launchOnStartup: z.boolean().optional(),
+  disableImageGeneration: z
+    .union([z.literal(false), z.literal(true), z.literal("chat")])
+    .optional(),
   enableLocalProxy: z.boolean().optional(),
   language: z.enum(["en", "zh", "zh-TW", "ja"]).optional(),
 

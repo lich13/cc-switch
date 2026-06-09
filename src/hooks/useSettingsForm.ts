@@ -51,6 +51,13 @@ const sanitizeDir = (value?: string | null): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
+const normalizeDisableImageGeneration = (
+  value?: Settings["disableImageGeneration"] | null,
+): false | true | "chat" => {
+  if (value === false || value === true || value === "chat") return value;
+  return false;
+};
+
 export interface UseSettingsFormResult {
   settings: SettingsFormState | null;
   isLoading: boolean;
@@ -115,6 +122,9 @@ export function useSettingsForm(): UseSettingsFormResult {
       enableClaudePluginIntegration:
         data.enableClaudePluginIntegration ?? false,
       silentStartup: data.silentStartup ?? false,
+      disableImageGeneration: normalizeDisableImageGeneration(
+        data.disableImageGeneration,
+      ),
       skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
       claudeConfigDir: sanitizeDir(data.claudeConfigDir),
       codexConfigDir: sanitizeDir(data.codexConfigDir),
@@ -140,6 +150,7 @@ export function useSettingsForm(): UseSettingsFormResult {
             useAppWindowControls: false,
             enableClaudePluginIntegration: false,
             skipClaudeOnboarding: false,
+            disableImageGeneration: false,
             language: readPersistedLanguage(),
           } as SettingsFormState);
 
@@ -176,6 +187,9 @@ export function useSettingsForm(): UseSettingsFormResult {
         enableClaudePluginIntegration:
           serverData.enableClaudePluginIntegration ?? false,
         silentStartup: serverData.silentStartup ?? false,
+        disableImageGeneration: normalizeDisableImageGeneration(
+          serverData.disableImageGeneration,
+        ),
         skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
         claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
         codexConfigDir: sanitizeDir(serverData.codexConfigDir),

@@ -32,13 +32,13 @@ Verified on this workspace for the v3.16.0 fork release:
 - Current remote `upstream`: `https://github.com/farion1231/cc-switch.git`.
 - `upstream` push URL is disabled.
 - Current upstream release baseline: `farion1231/cc-switch v3.16.0`, commit `47232cb05dc0527f56bc4dc1d61b075ad83eeefe`.
-- Current fork release target: GitHub tag `v3.16.0-lich13.9`, app version `3.16.0-9`.
+- Current fork release target: GitHub tag `v3.16.0-lich13.10`, app version `3.16.0-10`.
 - Existing release workflow: `.github/workflows/release.yml`.
 - `.gitignore` no longer ignores `.github`; fork workflows are intended to be tracked normally.
-- Fork app version is `3.16.0-9`.
+- Fork app version is `3.16.0-10`.
 - Fork product identity is `CC Switch Pure Route` / `com.lich13.ccswitch`.
 - Tauri updater endpoint points at `https://github.com/lich13/cc-switch/releases/latest/download/latest.json`.
-- Release workflow converts tags like `v3.16.0-lich13.9` into updater version `3.16.0-9` in `latest.json`.
+- Release workflow converts tags like `v3.16.0-lich13.10` into updater version `3.16.0-10` in `latest.json`.
 - Fork-specific Tauri updater signing requires `TAURI_SIGNING_PRIVATE_KEY` and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - Apple signing/notarization secrets are optional. The release workflow packages unsigned macOS artifacts when those secrets are missing.
 - `src-tauri/Cargo.toml` patches `muda` to `vendor/muda-0.17.1`; do not remove this patch during upstream syncs without replacing the zero-dimension icon fix.
@@ -266,7 +266,7 @@ The guard belongs at service/command boundaries that have access to `AppState` o
   - Skips Apple notarization checks unless Apple secrets are configured.
 
 - `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.lock`
-  - Fork version and updater identity are pinned to the active fork release version, currently `3.16.0-9` for tag `v3.16.0-lich13.9`.
+  - Fork version and updater identity are pinned to the active fork release version, currently `3.16.0-10` for tag `v3.16.0-lich13.10`.
 
 - `src/i18n/locales/en.json`
 - `src/i18n/locales/zh.json`

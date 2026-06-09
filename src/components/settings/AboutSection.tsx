@@ -41,6 +41,7 @@ import type { AppId } from "@/lib/api/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
+import { releaseTagFromVersion } from "@/lib/release";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
 
@@ -70,6 +71,8 @@ const TOOL_NAMES = [
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 type ToolLifecycleAction = "install" | "update";
+
+const RELEASES_URL = "https://github.com/lich13/cc-switch/releases";
 
 type WslShellPreference = {
   wslShell?: string | null;
@@ -369,21 +372,15 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
       const targetVersion = updateInfo?.availableVersion ?? version ?? "";
-      const displayVersion = targetVersion.startsWith("v")
-        ? targetVersion
-        : targetVersion
-          ? `v${targetVersion}`
-          : "";
+      const releaseTag = releaseTagFromVersion(targetVersion);
 
-      if (!displayVersion) {
-        await settingsApi.openExternal(
-          "https://github.com/lich13/cc-switch/releases",
-        );
+      if (!releaseTag) {
+        await settingsApi.openExternal(RELEASES_URL);
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/lich13/cc-switch/releases/tag/${displayVersion}`,
+        `${RELEASES_URL}/tag/${releaseTag}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
