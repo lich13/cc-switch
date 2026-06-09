@@ -120,6 +120,46 @@ describe("useSettingsForm Hook", () => {
     });
   });
 
+  it("should normalize null and unknown image generation disablement values to false", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: null,
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result, rerender } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe(false);
+    });
+
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: "__invalid__",
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe(false);
+    });
+  });
+
   it("should support japanese language preference from server data", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {

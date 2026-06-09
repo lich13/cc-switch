@@ -155,9 +155,9 @@ export function ProviderList({
   const removeFromQueue = useRemoveFromFailoverQueue();
 
   const routeActive =
-    isProxyTakeover === true || (appId === "codex" && routingMode === "local_only");
-  const isFailoverModeActive =
-    routeActive && isAutoFailoverEnabled === true;
+    isProxyTakeover === true ||
+    (appId === "codex" && routingMode === "local_only");
+  const isFailoverModeActive = routeActive && isAutoFailoverEnabled === true;
 
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);

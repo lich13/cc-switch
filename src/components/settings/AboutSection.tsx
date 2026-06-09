@@ -379,9 +379,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         return;
       }
 
-      await settingsApi.openExternal(
-        `${RELEASES_URL}/tag/${releaseTag}`,
-      );
+      await settingsApi.openExternal(`${RELEASES_URL}/tag/${releaseTag}`);
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
       toast.error(t("settings.openReleaseNotesFailed"));
