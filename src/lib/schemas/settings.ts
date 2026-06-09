@@ -16,7 +16,9 @@ export const settingsSchema = z.object({
   launchOnStartup: z.boolean().optional(),
   disableImageGeneration: z
     .union([z.literal(false), z.literal(true), z.literal("chat")])
-    .optional(),
+    .nullish()
+    .catch("chat")
+    .transform((value) => value ?? "chat"),
   enableLocalProxy: z.boolean().optional(),
   language: z.enum(["en", "zh", "zh-TW", "ja"]).optional(),
 
