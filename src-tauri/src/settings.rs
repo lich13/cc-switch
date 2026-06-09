@@ -30,9 +30,9 @@ fn default_true() -> bool {
 /// false = off, true = all, "chat" = chat/responses only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DisableImageGenerationMode {
+    #[default]
     Off,
     All,
-    #[default]
     Chat,
 }
 
@@ -64,7 +64,7 @@ impl<'de> Visitor<'de> for DisableImageGenerationModeVisitor {
     type Value = DisableImageGenerationMode;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a boolean or one of false, true, all, chat")
+        formatter.write_str("a boolean or one of false, true, chat")
     }
 
     fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
@@ -96,24 +96,24 @@ impl<'de> Visitor<'de> for DisableImageGenerationModeVisitor {
     where
         E: de::Error,
     {
-        Ok(DisableImageGenerationMode::Chat)
+        Ok(DisableImageGenerationMode::Off)
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(DisableImageGenerationMode::Chat)
+        Ok(DisableImageGenerationMode::Off)
     }
 }
 
 fn parse_disable_image_generation_mode(value: &str) -> Result<DisableImageGenerationMode, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "false" | "0" | "off" | "no" => Ok(DisableImageGenerationMode::Off),
-        "true" | "1" | "on" | "yes" | "all" => Ok(DisableImageGenerationMode::All),
+        "true" | "1" | "on" | "yes" => Ok(DisableImageGenerationMode::All),
         "chat" => Ok(DisableImageGenerationMode::Chat),
         other => Err(format!(
-            "invalid disableImageGeneration value {other:?} (allowed: true, false, all, chat)"
+            "invalid disableImageGeneration value {other:?} (allowed: true, false, chat)"
         )),
     }
 }
@@ -460,7 +460,7 @@ impl Default for AppSettings {
             skip_claude_onboarding: false,
             launch_on_startup: false,
             silent_startup: false,
-            disable_image_generation: DisableImageGenerationMode::Chat,
+            disable_image_generation: DisableImageGenerationMode::Off,
             enable_local_proxy: false,
             proxy_confirmed: None,
             usage_confirmed: None,
@@ -1004,21 +1004,21 @@ mod tests {
     }
 
     #[test]
-    fn disable_image_generation_defaults_to_chat() {
+    fn disable_image_generation_defaults_to_off() {
         assert_eq!(
             DisableImageGenerationMode::default(),
-            DisableImageGenerationMode::Chat
+            DisableImageGenerationMode::Off
         );
         assert_eq!(
             AppSettings::default().disable_image_generation,
-            DisableImageGenerationMode::Chat
+            DisableImageGenerationMode::Off
         );
 
         let settings: AppSettings = serde_json::from_value(serde_json::json!({}))
             .expect("settings should deserialize with defaults");
         assert_eq!(
             settings.disable_image_generation,
-            DisableImageGenerationMode::Chat
+            DisableImageGenerationMode::Off
         );
     }
 
@@ -1027,7 +1027,6 @@ mod tests {
         for (raw, expected) in [
             (serde_json::json!(false), DisableImageGenerationMode::Off),
             (serde_json::json!(true), DisableImageGenerationMode::All),
-            (serde_json::json!("all"), DisableImageGenerationMode::All),
             (serde_json::json!("chat"), DisableImageGenerationMode::Chat),
         ] {
             let mode: DisableImageGenerationMode =
@@ -1041,7 +1040,6 @@ mod tests {
         for (raw, expected) in [
             (serde_json::json!(false), DisableImageGenerationMode::Off),
             (serde_json::json!(true), DisableImageGenerationMode::All),
-            (serde_json::json!("all"), DisableImageGenerationMode::All),
             (serde_json::json!("chat"), DisableImageGenerationMode::Chat),
         ] {
             let settings: AppSettings = serde_json::from_value(serde_json::json!({
