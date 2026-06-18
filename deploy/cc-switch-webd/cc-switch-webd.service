@@ -1,0 +1,27 @@
+[Unit]
+Description=CC Switch WebUI daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cc-switch-webd
+Group=cc-switch-webd
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/cc-switch-webd/env
+ExecStart=/usr/local/bin/cc-switch-webd serve --config /etc/cc-switch-webd/config.toml
+Restart=on-failure
+RestartSec=3
+LogsDirectory=cc-switch-webd
+StateDirectory=cc-switch-webd
+ConfigurationDirectory=cc-switch-webd
+StandardOutput=append:/var/log/cc-switch-webd/webd.log
+StandardError=append:/var/log/cc-switch-webd/webd.log
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/cc-switch-webd /var/log/cc-switch-webd /etc/cc-switch-webd
+
+[Install]
+WantedBy=multi-user.target

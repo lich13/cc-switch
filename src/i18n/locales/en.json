@@ -145,6 +145,8 @@
     "officialPartner": "Official Partner",
     "managedByHermes": "Hermes Managed",
     "managedByHermesHint": "Defined in Hermes' providers: dict. Edit or remove it via Hermes Web UI.",
+    "disableImageGenerationInChat": "Disable image generation in chat",
+    "disableImageGenerationInChatDescription": "Remove OpenAI image_generation tools from chat/Responses requests",
     "openTerminal": "Open Terminal",
     "terminalOpened": "Terminal opened",
     "terminalOpenFailed": "Failed to open terminal",
@@ -321,6 +323,8 @@
     "tabAuth": "Auth",
     "tabAdvanced": "Advanced",
     "tabProxy": "Routing",
+    "disableImageGenerationInChat": "Disable Image Generation in Chat",
+    "disableImageGenerationInChatDescription": "When enabled, local routing removes OpenAI's built-in image_generation tool from chat/Responses requests. Image APIs are not affected.",
     "authCenter": {
       "title": "OAuth Authentication Center",
       "description": "Use your other subscriptions in Claude Code — please be mindful of compliance risks.",
@@ -387,6 +391,29 @@
         "mediaHeuristic": "Heuristic Text-Only Model Detection",
         "mediaHeuristicDescription": "Predictively strips images before sending based on a built-in model-name list. When off, only the declared-text-only and upstream-error fallback paths remain, preventing the built-in list from misclassifying a multimodal model as text-only and silently dropping images"
       },
+      "userAgentRewrite": {
+        "title": "User-Agent Rewrite",
+        "description": "Match client User-Agent values with regex rules and rewrite them to the selected target UA for each app",
+        "saveHint": "The enable switch is saved immediately. Target UA values and match rules take effect after Save.",
+        "enabled": "Enable User-Agent Rewrite",
+        "enabledDescription": "When off, request User-Agent values are left unchanged",
+        "claudeTarget": "Claude Target UA",
+        "codexTarget": "Codex Target UA",
+        "rules": "Match Regex",
+        "rulesPlaceholder": "^OpenAI/Python [0-9.]+$",
+        "rulesDescription": "Shared match rules. Enabled rules are checked before app-specific target User-Agent replacement.",
+        "ruleEnabled": "Enable rule",
+        "addRule": "Add Rule",
+        "deleteRule": "Delete rule",
+        "claudeTargetRequired": "Claude target User-Agent is required",
+        "codexTargetRequired": "Codex target User-Agent is required",
+        "tooManyRules": "Too many User-Agent rewrite rules",
+        "emptyRule": "Enabled User-Agent regex cannot be empty",
+        "invalidRegex": "Enabled User-Agent regex is invalid",
+        "save": "Save",
+        "saving": "Saving...",
+        "saved": "User-Agent rewrite config saved"
+      },
       "optimizer": {
         "title": "Bedrock Request Optimizer",
         "description": "Automatically optimize Thinking and Cache configuration before sending requests (only applies to Bedrock providers)",
@@ -421,6 +448,10 @@
           "debug": "Detailed info including SSE stream and request/response",
           "trace": "All logs, most verbose"
         }
+      },
+      "providerData": {
+        "title": "Provider Import/Export",
+        "description": "Import or export only the current providers, without app settings or database backups"
       }
     },
     "language": "Language",
@@ -868,7 +899,32 @@
       "defaultCostMultiplierRequired": "Default multiplier is required",
       "defaultCostMultiplierInvalid": "Invalid multiplier format"
     },
-    "saveFailedGeneric": "Save failed, please try again"
+    "saveFailedGeneric": "Save failed, please try again",
+    "providerImportExport": "Provider Import/Export",
+    "providerImportExportHint": "Only provider data is included. The exported JSON includes API keys/tokens, so store it as a sensitive file.",
+    "importProviders": "Import Providers",
+    "exportProviders": "Export Providers",
+    "exportProvidersSub2api": "Export sub2api",
+    "importingProviders": "Importing providers...",
+    "exportingProviders": "Exporting providers...",
+    "providerImportSuccess": "Providers imported",
+    "providerExportSuccess": "Providers exported",
+    "providerImportFailed": "Provider import failed",
+    "providerExportFailed": "Provider export failed",
+    "providerImportFailedError": "Provider import failed: {{message}}",
+    "providerExportFailedError": "Provider export failed: {{message}}",
+    "providerTransferDone": "Provider operation complete",
+    "providerTransferDoneHint": "Provider data has been updated. Refresh the main page if needed.",
+    "providerTransferFailed": "Provider operation failed",
+    "sub2apiExportDialog": {
+      "title": "Choose sub2api accounts",
+      "description": "Only checked provider accounts that still resolve an API key and base URL will be exported.",
+      "selectedCount": "{{count}} accounts selected",
+      "selectAll": "Select all",
+      "clear": "Clear",
+      "export": "Export",
+      "empty": "No exportable accounts"
+    }
   },
   "apps": {
     "claude": "Claude",

@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_settings_path, read_json_file, AppError, AppState, AppType, McpApps, McpServer,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -20,6 +20,67 @@ fn sanitize_provider_name(name: &str) -> String {
         })
         .collect::<String>()
         .to_lowercase()
+}
+
+fn seed_codex_live_files(auth: &serde_json::Value, config: &str) {
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    let config_path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent).expect("create codex config dir");
+    }
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string(auth).expect("serialize auth"),
+    )
+    .expect("seed auth.json");
+    std::fs::write(&config_path, config).expect("seed config.toml");
+}
+
+fn codex_live_file_bytes() -> (Vec<u8>, Vec<u8>) {
+    (
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth.json bytes"),
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config.toml bytes"),
+    )
+}
+
+fn assert_codex_live_files_unchanged(before: &(Vec<u8>, Vec<u8>)) {
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth.json bytes"),
+        before.0,
+        "auth.json should remain byte-equivalent"
+    );
+    assert_eq!(
+        std::fs::read(cc_switch_lib::get_codex_config_path()).expect("read config.toml bytes"),
+        before.1,
+        "config.toml should remain byte-equivalent"
+    );
+}
+
+fn assert_codex_switch_route_only_updates_current(
+    state: &AppState,
+    target_provider: &str,
+    _previous_current: Option<&str>,
+    before: &(Vec<u8>, Vec<u8>),
+) {
+    ProviderService::switch(state, AppType::Codex, target_provider)
+        .expect("Codex provider switch should update local route only");
+    assert_codex_live_files_unchanged(before);
+
+    let current_id = state
+        .db
+        .get_current_provider(AppType::Codex.as_str())
+        .expect("read current provider after route-only switch");
+    assert_eq!(
+        current_id.as_deref(),
+        Some(target_provider),
+        "Codex route-only switch should update the current provider"
+    );
+    assert!(
+        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+            .expect("read Codex live backup after route-only switch")
+            .is_none(),
+        "Codex route-only switch should not create or keep a live backup"
+    );
 }
 
 #[test]
@@ -97,7 +158,7 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
 }
 
 #[test]
-fn provider_service_switch_codex_updates_live_and_config() {
+fn provider_service_switch_codex_updates_route_only_and_keeps_live_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
@@ -108,8 +169,7 @@ fn provider_service_switch_codex_updates_live_and_config() {
 type = "stdio"
 command = "echo"
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing codex live config");
+    seed_codex_live_files(&legacy_auth, legacy_config);
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -175,43 +235,19 @@ command = "say"
     );
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "new-provider")
-        .expect("switch provider should succeed");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("legacy-key"),
-        "Codex provider switching should preserve the existing live auth.json"
-    );
-
-    let config_text =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
-    );
-    assert!(
-        config_text.contains("experimental_bearer_token"),
-        "config.toml should carry the selected provider API key"
-    );
-
-    let current_id = state
-        .db
-        .get_current_provider(AppType::Codex.as_str())
-        .expect("read current provider after switch");
-    assert_eq!(
-        current_id.as_deref(),
-        Some("new-provider"),
-        "current provider updated"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "new-provider",
+        Some("old-provider"),
+        &before,
     );
 
     let providers = state
         .db
         .get_all_providers(AppType::Codex.as_str())
-        .expect("read providers after switch");
+        .expect("read providers after route-only switch");
 
     let new_provider = providers.get("new-provider").expect("new provider exists");
     let new_config_text = new_provider
@@ -219,15 +255,9 @@ command = "say"
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // provider 存储的是原始配置，不包含 MCP 同步后的内容
     assert!(
         new_config_text.contains("mcp_servers.latest"),
-        "provider config should contain original MCP servers"
-    );
-    // live 文件额外包含同步的 MCP 服务器
-    assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "live config should include synced MCP servers"
+        "route-only switch should leave provider config untouched"
     );
 
     let legacy = providers
@@ -240,8 +270,8 @@ command = "say"
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        legacy_auth_value, "legacy-key",
-        "previous provider should be backfilled with live auth"
+        legacy_auth_value, "stale",
+        "route-only switch should not backfill the previous provider"
     );
 }
 
@@ -261,8 +291,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing codex live config");
+    seed_codex_live_files(&legacy_auth, legacy_config);
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -305,41 +334,19 @@ requires_openai_auth = true
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "new-provider")
-        .expect("switch provider should succeed");
-
-    let config_text =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    let parsed: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
-
-    assert_eq!(
-        parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "provider switching should preserve user-editable model_provider after the one-time migration"
-    );
-
-    let model_providers = parsed
-        .get("model_providers")
-        .and_then(|v| v.as_table())
-        .expect("model_providers table exists");
-    assert!(
-        model_providers.get("custom").is_none(),
-        "provider switching should not force user-edited provider ids back to custom"
-    );
-    assert_eq!(
-        model_providers
-            .get("aihubmix")
-            .and_then(|v| v.get("base_url"))
-            .and_then(|v| v.as_str()),
-        Some("https://aihubmix.example/v1"),
-        "selected provider id should point at the newly selected supplier endpoint"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "new-provider",
+        Some("old-provider"),
+        &before,
     );
 
     let providers = state
         .db
         .get_all_providers(AppType::Codex.as_str())
-        .expect("read providers after switch");
+        .expect("read providers after route-only switch");
     let new_config_text = providers
         .get("new-provider")
         .expect("new provider exists")
@@ -349,12 +356,12 @@ requires_openai_auth = true
         .unwrap_or_default();
     assert!(
         new_config_text.contains("[model_providers.aihubmix]"),
-        "stored provider template should remain provider-specific"
+        "route-only switch should leave provider template unchanged"
     );
 }
 
 #[test]
-fn provider_service_switch_codex_preserves_oauth_and_backfills_api_key_from_live_token() {
+fn provider_service_switch_codex_preserves_oauth_and_provider_auth_route_only() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
@@ -377,8 +384,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&live_auth, Some(legacy_config))
-        .expect("seed existing Codex OAuth live config");
+    seed_codex_live_files(&live_auth, legacy_config);
 
     let bridge_provider = Provider::with_id(
         "bridge-provider".to_string(),
@@ -442,53 +448,14 @@ requires_openai_auth = true
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "bridge-provider")
-        .expect("switch to bridge provider should succeed");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value.get("auth_mode").and_then(|v| v.as_str()),
-        Some("chatgpt")
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "bridge-provider",
+        Some("legacy-provider"),
+        &before,
     );
-    assert!(
-        auth_value
-            .get("OPENAI_API_KEY")
-            .is_some_and(|v| v.is_null()),
-        "provider switching should keep OPENAI_API_KEY null in live auth.json"
-    );
-    assert_eq!(
-        auth_value
-            .pointer("/tokens/access_token")
-            .and_then(|v| v.as_str()),
-        Some("oauth-token"),
-        "existing ChatGPT OAuth token should be preserved"
-    );
-
-    let live_config =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    let parsed_live: toml::Value = toml::from_str(&live_config).expect("parse live config");
-    assert_eq!(
-        parsed_live
-            .get("model_providers")
-            .and_then(|v| v.get("aihubmix"))
-            .and_then(|v| v.get("experimental_bearer_token"))
-            .and_then(|v| v.as_str()),
-        Some("bridge-key"),
-        "third-party key should be injected into the selected live provider table"
-    );
-    assert_eq!(
-        parsed_live
-            .get("model_providers")
-            .and_then(|v| v.get("aihubmix"))
-            .and_then(|v| v.get("requires_openai_auth"))
-            .and_then(|v| v.as_bool()),
-        Some(true)
-    );
-
-    ProviderService::switch(&state, AppType::Codex, "plain-provider")
-        .expect("switch away should backfill bridge provider");
 
     let providers = state
         .db
@@ -496,21 +463,21 @@ requires_openai_auth = true
         .expect("read providers");
     let stored_bridge = providers
         .get("bridge-provider")
-        .expect("bridge provider exists after backfill");
+        .expect("bridge provider exists after route-only switch");
     assert_eq!(
         stored_bridge
             .settings_config
             .pointer("/auth/OPENAI_API_KEY")
             .and_then(|v| v.as_str()),
         Some("bridge-key"),
-        "backfill should restore the API key into stored provider auth"
+        "route-only switch should leave stored provider auth untouched"
     );
     assert!(
         stored_bridge
             .settings_config
             .pointer("/auth/tokens")
             .is_none(),
-        "backfill should not persist ChatGPT OAuth tokens into provider storage"
+        "route-only switch should not persist ChatGPT OAuth tokens into provider storage"
     );
     assert!(
         !stored_bridge
@@ -528,7 +495,7 @@ requires_openai_auth = true
     clippy::await_holding_lock,
     reason = "this integration-style test must serialize global test HOME and settings mutations across async takeover calls"
 )]
-async fn codex_official_to_deepseek_then_takeover_enters_and_restores_proxy_managed_live_config() {
+async fn codex_official_to_deepseek_then_takeover_enables_route_only_switch() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
@@ -548,8 +515,7 @@ model = "gpt-5"
 name = "OpenAI"
 wire_api = "responses"
 "#;
-    write_codex_live_atomic(&oauth_auth, Some(official_config))
-        .expect("seed official Codex OAuth live config");
+    seed_codex_live_files(&oauth_auth, official_config);
 
     let deepseek_provider_config = r#"model_provider = "deepseek"
 model = "deepseek-chat"
@@ -596,108 +562,175 @@ wire_api = "responses"
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
+    proxy_config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(proxy_config)
+        .await
+        .expect("set proxy to ephemeral port");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "deepseek-provider")
-        .expect("switch from official subscription to DeepSeek");
-
-    let auth_after_switch: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth after switch");
-    assert_eq!(
-        auth_after_switch, oauth_auth,
-        "normal provider switch with Codex preservation enabled must keep OAuth auth.json"
-    );
-
-    let config_after_switch =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
-    assert!(
-        config_after_switch.contains("https://api.deepseek.com/v1"),
-        "normal switch should write the DeepSeek endpoint before takeover"
-    );
-    assert!(
-        config_after_switch.contains("deepseek-key"),
-        "normal switch should inject the DeepSeek key into config.toml"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "deepseek-provider",
+        Some("official-provider"),
+        &before,
     );
 
     state
         .proxy_service
         .set_takeover_for_app("codex", true)
         .await
-        .expect("enable Codex takeover");
-
-    let auth_after_takeover: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth after takeover");
-    assert_eq!(
-        auth_after_takeover, oauth_auth,
-        "enabling takeover must not rewrite Codex OAuth auth.json"
-    );
-
-    let config_after_takeover =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
+        .expect("Codex route-only takeover should enable without live writes");
+    assert_codex_live_files_unchanged(&before);
     assert!(
-        config_after_takeover.contains("http://127.0.0.1:15721/v1"),
-        "enabling takeover should point Codex config.toml at the local proxy"
+        state
+            .db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read Codex proxy config")
+            .enabled,
+        "route-only takeover should mark Codex enabled"
     );
     assert!(
-        config_after_takeover.contains("PROXY_MANAGED"),
-        "enabling takeover should move the proxy placeholder into config.toml"
-    );
-    assert!(
-        !config_after_takeover.contains("https://api.deepseek.com/v1"),
-        "takeover live config should not keep the upstream DeepSeek endpoint"
+        state
+            .db
+            .get_live_backup("codex")
+            .await
+            .expect("read Codex backup after takeover")
+            .is_none(),
+        "route-only takeover should not create a Codex live backup"
     );
 
-    let backup = state
+    ProviderService::switch(&state, AppType::Codex, "deepseek-provider")
+        .expect("Codex route-only switch should update local route");
+    assert_codex_live_files_unchanged(&before);
+    let current = state
         .db
-        .get_live_backup("codex")
+        .get_current_provider(AppType::Codex.as_str())
+        .expect("read current provider after route-only switch");
+    assert_eq!(current.as_deref(), Some("deepseek-provider"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "this integration-style test must serialize global test HOME and settings mutations across async takeover calls"
+)]
+async fn codex_route_only_allows_official_switch_while_proxy_enabled() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    enable_codex_official_auth_preservation();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-live-token",
+            "account_id": "acct-live"
+        }
+    });
+    seed_codex_live_files(
+        &live_auth,
+        "model_provider = \"openai\"\nmodel = \"gpt-5\"\n",
+    );
+
+    let mut official_provider = Provider::with_id(
+        "official-provider".to_string(),
+        "OpenAI Official".to_string(),
+        json!({
+            "auth": {},
+            "config": ""
+        }),
+        None,
+    );
+    official_provider.category = Some("official".to_string());
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "deepseek-provider".to_string();
+        manager.providers.insert(
+            "deepseek-provider".to_string(),
+            Provider::with_id(
+                "deepseek-provider".to_string(),
+                "DeepSeek".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "deepseek-key"},
+                    "config": r#"model_provider = "deepseek"
+model = "deepseek-chat"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+        manager
+            .providers
+            .insert("official-provider".to_string(), official_provider);
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
+    proxy_config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(proxy_config)
         .await
-        .expect("read Codex backup")
-        .expect("backup exists after takeover");
-    let backup_value: serde_json::Value =
-        serde_json::from_str(&backup.original_config).expect("parse backup");
-    let backup_config = backup_value
-        .get("config")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    assert!(
-        backup_config.contains("https://api.deepseek.com/v1")
-            && backup_config.contains("deepseek-key"),
-        "takeover backup should remain the restorable DeepSeek config"
+        .expect("set proxy to ephemeral port");
+    let before = codex_live_file_bytes();
+
+    state
+        .proxy_service
+        .set_takeover_for_app("codex", true)
+        .await
+        .expect("enable Codex route-only takeover");
+
+    ProviderService::switch(&state, AppType::Codex, "official-provider")
+        .expect("Codex provider switch should allow official route-only targets");
+    assert_codex_live_files_unchanged(&before);
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("official-provider")
     );
 
     state
         .proxy_service
-        .set_takeover_for_app("codex", false)
+        .hot_switch_provider("codex", "deepseek-provider")
         .await
-        .expect("disable Codex takeover");
-
-    let restored_auth: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read restored auth");
+        .expect("Codex proxy panel hot switch should allow custom route-only target");
+    state
+        .proxy_service
+        .hot_switch_provider("codex", "official-provider")
+        .await
+        .expect("Codex proxy panel hot switch should allow official route-only target");
+    assert_codex_live_files_unchanged(&before);
     assert_eq!(
-        restored_auth, oauth_auth,
-        "disabling takeover should restore without replacing OAuth auth.json"
-    );
-
-    let restored_config = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
-        .expect("read restored config");
-    assert!(
-        restored_config.contains("https://api.deepseek.com/v1")
-            && restored_config.contains("deepseek-key"),
-        "disabling takeover should restore the selected DeepSeek live config"
-    );
-    assert!(
-        !restored_config.contains("PROXY_MANAGED"),
-        "restored live config must not keep the proxy placeholder"
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider after hot switch")
+            .as_deref(),
+        Some("official-provider")
     );
 }
 
 #[test]
-fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
+fn provider_service_switch_codex_preserves_live_oauth_when_preservation_off() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    // Intentionally do NOT enable preservation: this locks the default opt-out
-    // behavior where switching to a third-party provider rewrites auth.json,
-    // discarding the user's ChatGPT OAuth login. It is the dual of
-    // `provider_service_switch_codex_preserves_oauth_and_backfills_api_key_from_live_token`.
     let _home = ensure_test_home();
 
     let live_auth = json!({
@@ -717,8 +750,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&live_auth, Some(legacy_config))
-        .expect("seed existing Codex OAuth live config");
+    seed_codex_live_files(&live_auth, legacy_config);
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -761,20 +793,13 @@ requires_openai_auth = true
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "third-party")
-        .expect("switch to third-party provider should succeed");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("third-party-key"),
-        "default (preservation off) should overwrite auth.json with the third-party API key"
-    );
-    assert!(
-        auth_value.pointer("/tokens/access_token").is_none(),
-        "default switch must clear the official ChatGPT OAuth token from live auth.json"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "third-party",
+        Some("legacy-provider"),
+        &before,
     );
 }
 
@@ -792,7 +817,7 @@ fn provider_service_switch_codex_supports_official_login_provider_without_auth_w
             "account_id": "acct-official"
         }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official OAuth live config");
+    seed_codex_live_files(&live_auth, "");
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -835,40 +860,18 @@ requires_openai_auth = true
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "official-provider")
-        .expect("switch to official provider should succeed without API key");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value.get("auth_mode").and_then(|v| v.as_str()),
-        Some("chatgpt")
-    );
-    assert!(
-        auth_value
-            .get("OPENAI_API_KEY")
-            .is_some_and(|v| v.is_null()),
-        "official provider switching should keep OPENAI_API_KEY null"
-    );
-    assert_eq!(
-        auth_value
-            .pointer("/tokens/access_token")
-            .and_then(|v| v.as_str()),
-        Some("official-oauth-token"),
-        "official provider should preserve the existing ChatGPT OAuth token"
-    );
-
-    let live_config =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    assert!(
-        !live_config.contains("experimental_bearer_token"),
-        "official login provider has no API key to inject"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "official-provider",
+        Some("legacy-provider"),
+        &before,
     );
 }
 
 #[test]
-fn provider_service_switch_codex_official_accounts_write_auth_json() {
+fn provider_service_switch_codex_official_accounts_switch_route_only_without_auth_write() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -881,7 +884,7 @@ fn provider_service_switch_codex_official_accounts_write_auth_json() {
             "account_id": "acct-a"
         }
     });
-    write_codex_live_atomic(&live_auth_a, Some("")).expect("seed official account A live auth");
+    seed_codex_live_files(&live_auth_a, "");
 
     let mut official_a = Provider::with_id(
         "official-a".to_string(),
@@ -934,34 +937,18 @@ fn provider_service_switch_codex_official_accounts_write_auth_json() {
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "official-b")
-        .expect("switch to official account B should write auth.json");
-    let auth_b: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth B");
-    assert_eq!(
-        auth_b
-            .pointer("/tokens/access_token")
-            .and_then(|v| v.as_str()),
-        Some("official-b-token"),
-        "switching official accounts must replace auth.json with the selected account"
-    );
-
-    ProviderService::switch(&state, AppType::Codex, "official-a")
-        .expect("switch back to official account A should use backfilled live auth");
-    let auth_a: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth A");
-    assert_eq!(
-        auth_a
-            .pointer("/tokens/access_token")
-            .and_then(|v| v.as_str()),
-        Some("official-a-live-token"),
-        "backfill should preserve account A's latest live token for later official switches"
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "official-b",
+        Some("official-a"),
+        &before,
     );
 }
 
 #[test]
-fn provider_service_switch_codex_backfill_keeps_provider_specific_model_provider_id() {
+fn provider_service_switch_codex_route_only_keeps_provider_specific_model_provider_id() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -976,8 +963,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(provider_a_config))
-        .expect("seed existing codex live config");
+    seed_codex_live_files(&legacy_auth, provider_a_config);
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -1045,16 +1031,19 @@ requires_openai_auth = true
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let before = codex_live_file_bytes();
 
-    ProviderService::switch(&state, AppType::Codex, "provider-b")
-        .expect("switch to provider b should succeed");
-    ProviderService::switch(&state, AppType::Codex, "provider-c")
-        .expect("switch to provider c should succeed");
+    assert_codex_switch_route_only_updates_current(
+        &state,
+        "provider-b",
+        Some("provider-a"),
+        &before,
+    );
 
     let providers = state
         .db
         .get_all_providers(AppType::Codex.as_str())
-        .expect("read providers after switches");
+        .expect("read providers after route-only switch");
     let provider_b_config = providers
         .get("provider-b")
         .expect("provider b exists")
@@ -1067,14 +1056,14 @@ requires_openai_auth = true
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
         Some("aihubmix"),
-        "backfill should restore provider b's storage-specific model_provider id"
+        "route-only switch should leave provider b's storage-specific model_provider id"
     );
     assert!(
         parsed
             .get("model_providers")
             .and_then(|v| v.get("aihubmix"))
             .is_some(),
-        "provider b should keep its own model_providers table after backfill"
+        "provider b should keep its own model_providers table after route-only switch"
     );
     assert_eq!(
         parsed
@@ -1187,7 +1176,7 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
 }
 
 #[test]
-fn switch_codex_provider_with_takeover_live_but_stopped_proxy_keeps_proxy_live_config() {
+fn switch_codex_provider_with_takeover_live_but_stopped_proxy_updates_route_only() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
@@ -1218,8 +1207,7 @@ base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
 experimental_bearer_token = "PROXY_MANAGED"
 "#;
-    write_codex_live_atomic(&oauth_auth, Some(proxy_live_config))
-        .expect("seed taken-over Codex live config");
+    seed_codex_live_files(&oauth_auth, proxy_live_config);
 
     let mut config = MultiAppConfig::default();
     {
@@ -1282,53 +1270,16 @@ wire_api = "responses"
         "fixture keeps the proxy server stopped"
     );
 
+    let before = codex_live_file_bytes();
     ProviderService::switch(&state, AppType::Codex, "new-provider")
-        .expect("switch should update takeover backup instead of writing normal live config");
+        .expect("Codex takeover switch should update local route only");
+    assert_codex_live_files_unchanged(&before);
 
-    let auth_after: serde_json::Value =
-        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_after, oauth_auth,
-        "provider switch during takeover ownership must not rewrite Codex OAuth auth"
-    );
-
-    let live_config =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        live_config.contains("http://127.0.0.1:15721/v1"),
-        "live config should remain pointed at the local proxy"
-    );
-    assert!(
-        live_config.contains("PROXY_MANAGED"),
-        "live config should keep the proxy bearer placeholder"
-    );
-    assert!(
-        live_config.contains(r#"model_provider = "deepseek-new""#)
-            && live_config.contains(r#"name = "DeepSeek New""#),
-        "live config should update the Codex-visible provider label during takeover"
-    );
-    assert!(
-        !live_config.contains("https://new.deepseek.example/v1"),
-        "normal provider base_url must not overwrite taken-over live config"
-    );
-
-    let backup = futures::executor::block_on(state.db.get_live_backup("codex"))
-        .expect("get Codex backup")
-        .expect("backup exists");
-    let backup_value: serde_json::Value =
-        serde_json::from_str(&backup.original_config).expect("parse backup");
-    assert_eq!(
-        backup_value.get("auth"),
-        Some(&auth_after),
-        "restore backup should preserve the official OAuth auth"
-    );
-    let backup_config = backup_value
-        .get("config")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert!(
-        backup_config.contains("new-key") && backup_config.contains("deepseek-new"),
-        "restore backup should be rebuilt from the newly selected provider"
+        futures::executor::block_on(state.db.get_live_backup("codex"))
+            .expect("get Codex backup")
+            .is_none(),
+        "route-only switch should clear stale Codex live backup"
     );
 
     let current = state
@@ -1730,14 +1681,11 @@ fn provider_service_switch_codex_missing_auth_returns_error() {
     let state = create_test_state_with_config(&config).expect("create test state");
 
     let err = ProviderService::switch(&state, AppType::Codex, "invalid")
-        .expect_err("switching should fail without auth");
-    match err {
-        AppError::Config(msg) => assert!(
-            msg.contains("auth"),
-            "expected auth related message, got {msg}"
-        ),
-        other => panic!("expected config error, got {other:?}"),
-    }
+        .expect_err("invalid Codex provider should be rejected before route update");
+    assert!(
+        err.to_string().contains("auth"),
+        "error should report invalid provider auth, got: {err:?}"
+    );
 }
 
 #[test]

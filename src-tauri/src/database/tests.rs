@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
-use crate::provider::{Provider, ProviderManager};
+use crate::provider::{Provider, ProviderManager, UniversalProvider};
 use indexmap::IndexMap;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -149,6 +149,688 @@ fn normalize_default(default: &Option<String>) -> Option<String> {
     default
         .as_ref()
         .map(|s| s.trim_matches('\'').trim_matches('"').to_string())
+}
+
+fn make_provider(id: &str, name: &str, base_url: &str) -> Provider {
+    let mut provider = Provider::with_id(
+        id.to_string(),
+        name.to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": format!("{id}-token")
+            }
+        }),
+        Some(format!("https://{id}.example")),
+    );
+    provider.category = Some("custom".to_string());
+    provider.created_at = Some(1_725_000_000_000);
+    provider.sort_index = Some(7);
+    provider.notes = Some(format!("{name} notes"));
+    provider.icon = Some("box".to_string());
+    provider.icon_color = Some("#336699".to_string());
+    provider
+}
+
+fn make_universal_provider(id: &str, name: &str) -> UniversalProvider {
+    let mut provider = UniversalProvider::new(
+        id.to_string(),
+        name.to_string(),
+        "newapi".to_string(),
+        format!("https://{id}.universal.example/v1"),
+        format!("{id}-universal-key"),
+    );
+    provider.apps.claude = true;
+    provider.apps.codex = true;
+    provider.notes = Some("universal notes".to_string());
+    provider.sort_index = Some(3);
+    provider
+}
+
+fn scalar_count(db: &Database, sql: &str) -> i64 {
+    let conn = db.conn.lock().expect("lock db");
+    conn.query_row(sql, [], |row| row.get(0)).expect("count")
+}
+
+fn provider_name(db: &Database, app_type: &str, id: &str) -> Option<String> {
+    let conn = db.conn.lock().expect("lock db");
+    conn.query_row(
+        "SELECT name FROM providers WHERE app_type = ?1 AND id = ?2",
+        params![app_type, id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn seed_non_provider_rows(db: &Database) {
+    let conn = db.conn.lock().expect("lock db");
+    conn.execute(
+        "INSERT OR REPLACE INTO mcp_servers
+         (id, name, server_config, tags, enabled_claude, enabled_codex, enabled_gemini)
+         VALUES ('mcp-keep', 'Keep MCP', '{}', '[]', 1, 0, 0)",
+        [],
+    )
+    .expect("seed mcp");
+    conn.execute(
+        "INSERT OR REPLACE INTO prompts
+         (id, app_type, name, content, enabled)
+         VALUES ('prompt-keep', 'claude', 'Keep Prompt', 'content', 1)",
+        [],
+    )
+    .expect("seed prompt");
+    conn.execute(
+        "INSERT OR REPLACE INTO skills
+         (id, name, directory, enabled_claude, installed_at, updated_at)
+         VALUES ('skill-keep', 'Keep Skill', '/tmp/skill', 1, 1, 1)",
+        [],
+    )
+    .expect("seed skill");
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('global_proxy_url', 'http://127.0.0.1:7890')",
+        [],
+    )
+    .expect("seed setting");
+    conn.execute(
+        "INSERT OR REPLACE INTO proxy_live_backup (app_type, original_config, backed_up_at)
+         VALUES ('claude', '{}', '2026-06-15T00:00:00Z')",
+        [],
+    )
+    .expect("seed live backup");
+    conn.execute(
+        "INSERT OR REPLACE INTO proxy_request_logs
+         (request_id, provider_id, app_type, model, latency_ms, status_code, created_at)
+         VALUES ('req-keep', 'old-provider', 'claude', 'model', 11, 200, 1725000000000)",
+        [],
+    )
+    .expect("seed usage log");
+}
+
+#[test]
+fn providers_json_export_import_replaces_only_providers_and_universal_providers() {
+    let source = Database::memory().expect("source db");
+    let mut source_provider = make_provider(
+        "source-provider",
+        "Source Provider",
+        "https://source.example",
+    );
+    source_provider.in_failover_queue = true;
+    source
+        .save_provider("claude", &source_provider)
+        .expect("save source provider");
+    source
+        .set_current_provider("claude", "source-provider")
+        .expect("set current");
+    source
+        .add_custom_endpoint("claude", "source-provider", "https://source-alt.example")
+        .expect("source endpoint");
+    source
+        .save_universal_provider(&make_universal_provider(
+            "universal-source",
+            "Universal Source",
+        ))
+        .expect("source universal");
+
+    let exported = source
+        .export_providers_json_string()
+        .expect("export providers json");
+    let envelope: serde_json::Value = serde_json::from_str(&exported).expect("json envelope");
+    assert_eq!(
+        envelope.get("format").and_then(serde_json::Value::as_str),
+        Some("cc-switch-providers-export")
+    );
+    assert_eq!(
+        envelope.get("version").and_then(serde_json::Value::as_i64),
+        Some(1)
+    );
+    assert!(envelope
+        .get("exportedAt")
+        .and_then(serde_json::Value::as_str)
+        .is_some());
+    assert!(envelope
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .is_some());
+    assert!(envelope
+        .get("providerEndpoints")
+        .and_then(serde_json::Value::as_array)
+        .is_some());
+    assert!(envelope
+        .get("universalProviders")
+        .and_then(serde_json::Value::as_object)
+        .is_some());
+
+    let target = Database::memory().expect("target db");
+    target
+        .save_provider(
+            "claude",
+            &make_provider("old-provider", "Old Provider", "https://old.example"),
+        )
+        .expect("save old provider");
+    target
+        .save_provider(
+            "codex",
+            &make_provider("codex-old", "Old Codex", "https://codex-old.example"),
+        )
+        .expect("save old codex");
+    target
+        .save_universal_provider(&make_universal_provider("universal-old", "Universal Old"))
+        .expect("old universal");
+    target
+        .set_setting("global_proxy_url", "http://127.0.0.1:9999")
+        .expect("proxy setting");
+    seed_non_provider_rows(&target);
+    {
+        let conn = target.conn.lock().expect("lock db");
+        conn.execute(
+            "INSERT OR REPLACE INTO provider_health
+             (provider_id, app_type, is_healthy, consecutive_failures, updated_at)
+             VALUES ('old-provider', 'claude', 0, 4, '2026-06-15T00:00:00Z')",
+            [],
+        )
+        .expect("seed health");
+    }
+
+    let summary = target
+        .import_providers_json_string(&exported)
+        .expect("import providers");
+
+    assert_eq!(summary.provider_count, 1);
+    assert_eq!(summary.provider_endpoint_count, 1);
+    assert_eq!(summary.universal_provider_count, 1);
+    assert_eq!(
+        provider_name(&target, "claude", "source-provider").as_deref(),
+        Some("Source Provider")
+    );
+    assert_eq!(provider_name(&target, "claude", "old-provider"), None);
+    assert_eq!(provider_name(&target, "codex", "codex-old"), None);
+    assert_eq!(
+        target
+            .get_current_provider("claude")
+            .expect("current provider")
+            .as_deref(),
+        Some("source-provider")
+    );
+    assert_eq!(
+        scalar_count(&target, "SELECT COUNT(*) FROM provider_endpoints"),
+        1
+    );
+    assert_eq!(
+        scalar_count(&target, "SELECT COUNT(*) FROM provider_health"),
+        0
+    );
+    assert!(target
+        .get_universal_provider("universal-source")
+        .expect("read universal")
+        .is_some());
+    assert!(target
+        .get_universal_provider("universal-old")
+        .expect("read old universal")
+        .is_none());
+
+    assert_eq!(
+        scalar_count(
+            &target,
+            "SELECT COUNT(*) FROM mcp_servers WHERE id = 'mcp-keep'"
+        ),
+        1
+    );
+    assert_eq!(
+        scalar_count(
+            &target,
+            "SELECT COUNT(*) FROM prompts WHERE id = 'prompt-keep'"
+        ),
+        1
+    );
+    assert_eq!(
+        scalar_count(
+            &target,
+            "SELECT COUNT(*) FROM skills WHERE id = 'skill-keep'"
+        ),
+        1
+    );
+    assert_eq!(
+        target
+            .get_setting("global_proxy_url")
+            .expect("proxy setting")
+            .as_deref(),
+        Some("http://127.0.0.1:7890")
+    );
+    assert_eq!(
+        scalar_count(&target, "SELECT COUNT(*) FROM proxy_live_backup"),
+        1
+    );
+    assert_eq!(
+        scalar_count(&target, "SELECT COUNT(*) FROM proxy_request_logs"),
+        1
+    );
+}
+
+#[test]
+fn providers_sub2api_export_uses_sample_shape_and_strips_v1_suffix() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("hanhe", "hh2", "https://api.hanhegufei.online/v1/"),
+    )
+    .expect("save claude provider");
+    db.save_provider(
+        "codex",
+        &Provider::with_id(
+            "codex-provider".to_string(),
+            "codex one".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-codex" },
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://codex.example.com/v1\"\n"
+            }),
+            None,
+        ),
+    )
+    .expect("save codex provider");
+    db.save_provider(
+        "claude",
+        &Provider::with_id(
+            "empty-key".to_string(),
+            "empty key".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://empty.example.com/v1",
+                    "ANTHROPIC_AUTH_TOKEN": ""
+                }
+            }),
+            None,
+        ),
+    )
+    .expect("save empty provider");
+
+    let exported = db
+        .export_providers_sub2api_json_string()
+        .expect("export sub2api");
+    let envelope: serde_json::Value = serde_json::from_str(&exported).expect("sub2api json");
+
+    assert!(envelope
+        .get("exported_at")
+        .and_then(serde_json::Value::as_str)
+        .is_some());
+    assert_eq!(
+        envelope
+            .get("proxies")
+            .and_then(serde_json::Value::as_array)
+            .expect("proxies")
+            .len(),
+        0
+    );
+
+    let accounts = envelope
+        .get("accounts")
+        .and_then(serde_json::Value::as_array)
+        .expect("accounts");
+    assert_eq!(accounts.len(), 2);
+    assert!(accounts.iter().all(
+        |account| account.get("name").and_then(serde_json::Value::as_str) != Some("empty key")
+    ));
+
+    let account = accounts
+        .iter()
+        .find(|account| account.get("name").and_then(serde_json::Value::as_str) == Some("hh2"))
+        .expect("hh2 account");
+    assert_eq!(
+        account.get("platform").and_then(serde_json::Value::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        account.get("type").and_then(serde_json::Value::as_str),
+        Some("apikey")
+    );
+    assert_eq!(
+        account
+            .pointer("/credentials/api_key")
+            .and_then(serde_json::Value::as_str),
+        Some("hanhe-token")
+    );
+    assert_eq!(
+        account
+            .pointer("/credentials/base_url")
+            .and_then(serde_json::Value::as_str),
+        Some("https://api.hanhegufei.online")
+    );
+    assert_eq!(
+        account
+            .pointer("/credentials/pool_mode")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        account
+            .pointer("/credentials/pool_mode_retry_count")
+            .and_then(serde_json::Value::as_i64),
+        Some(3)
+    );
+    assert_eq!(
+        account
+            .pointer("/extra/openai_apikey_responses_websockets_v2_enabled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        account
+            .pointer("/extra/openai_apikey_responses_websockets_v2_mode")
+            .and_then(serde_json::Value::as_str),
+        Some("off")
+    );
+    assert_eq!(
+        account
+            .pointer("/extra/openai_passthrough")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        account
+            .pointer("/extra/openai_responses_supported")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        account
+            .get("concurrency")
+            .and_then(serde_json::Value::as_i64),
+        Some(10)
+    );
+    assert_eq!(
+        account.get("priority").and_then(serde_json::Value::as_i64),
+        Some(2)
+    );
+    assert_eq!(
+        account
+            .get("rate_multiplier")
+            .and_then(serde_json::Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        account
+            .get("auto_pause_on_expired")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let codex = accounts
+        .iter()
+        .find(|account| {
+            account.get("name").and_then(serde_json::Value::as_str) == Some("codex one")
+        })
+        .expect("codex account");
+    assert_eq!(
+        codex
+            .pointer("/credentials/api_key")
+            .and_then(serde_json::Value::as_str),
+        Some("sk-codex")
+    );
+    assert_eq!(
+        codex
+            .pointer("/credentials/base_url")
+            .and_then(serde_json::Value::as_str),
+        Some("https://codex.example.com")
+    );
+}
+
+#[test]
+fn providers_sub2api_selected_export_exports_only_selected_accounts_in_stable_order() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("first", "First", "https://first.example/v1"),
+    )
+    .expect("save first provider");
+    db.save_provider(
+        "claude",
+        &make_provider("second", "Second", "https://second.example/v1"),
+    )
+    .expect("save second provider");
+    db.save_provider(
+        "codex",
+        &Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex Provider".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-codex" },
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://codex.example.com/v1\"\n"
+            }),
+            None,
+        ),
+    )
+    .expect("save codex provider");
+
+    let exported = db
+        .export_providers_sub2api_json_string_for_selection(&[
+            Sub2apiProviderSelection::new("codex", "codex-provider"),
+            Sub2apiProviderSelection::new("claude", "first"),
+        ])
+        .expect("export selected sub2api");
+    let envelope: serde_json::Value = serde_json::from_str(&exported).expect("sub2api json");
+    let accounts = envelope
+        .get("accounts")
+        .and_then(serde_json::Value::as_array)
+        .expect("accounts");
+
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(
+        accounts
+            .iter()
+            .filter_map(|account| account.get("name").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["First", "Codex Provider"]
+    );
+    assert!(accounts.iter().all(|account| {
+        account.get("name").and_then(serde_json::Value::as_str) != Some("Second")
+    }));
+}
+
+#[test]
+fn providers_sub2api_selected_export_rejects_empty_unknown_and_non_exportable_selection() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("exportable", "Exportable", "https://exportable.example/v1"),
+    )
+    .expect("save exportable provider");
+    db.save_provider(
+        "claude",
+        &Provider::with_id(
+            "empty-key".to_string(),
+            "Empty Key".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://empty.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN": ""
+                }
+            }),
+            None,
+        ),
+    )
+    .expect("save non-exportable provider");
+
+    let empty_err = db
+        .export_providers_sub2api_json_string_for_selection(&[])
+        .expect_err("empty selection should fail");
+    assert!(
+        empty_err.to_string().contains("empty selection"),
+        "unexpected empty selection error: {empty_err}"
+    );
+
+    let missing_err = db
+        .export_providers_sub2api_json_string_for_selection(&[Sub2apiProviderSelection::new(
+            "claude", "missing",
+        )])
+        .expect_err("missing provider should fail");
+    assert!(
+        missing_err.to_string().contains("not found")
+            || missing_err.to_string().contains("not exportable"),
+        "unexpected missing provider error: {missing_err}"
+    );
+
+    let non_exportable_err = db
+        .export_providers_sub2api_json_string_for_selection(&[Sub2apiProviderSelection::new(
+            "claude",
+            "empty-key",
+        )])
+        .expect_err("non-exportable provider should fail");
+    assert!(
+        non_exportable_err.to_string().contains("not exportable"),
+        "unexpected non-exportable provider error: {non_exportable_err}"
+    );
+}
+
+#[test]
+fn providers_sub2api_candidates_expose_metadata_without_secrets() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("exportable", "Exportable", "https://exportable.example/v1/"),
+    )
+    .expect("save exportable provider");
+    db.save_provider(
+        "claude",
+        &Provider::with_id(
+            "empty-key".to_string(),
+            "Empty Key".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://empty.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN": ""
+                }
+            }),
+            None,
+        ),
+    )
+    .expect("save non-exportable provider");
+
+    let candidates = db
+        .list_sub2api_export_candidates()
+        .expect("list candidates");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].app_type, "claude");
+    assert_eq!(candidates[0].provider_id, "exportable");
+    assert_eq!(candidates[0].name, "Exportable");
+    assert_eq!(candidates[0].base_url, "https://exportable.example");
+
+    let serialized = serde_json::to_value(&candidates[0]).expect("candidate json");
+    assert!(serialized.get("appType").is_some());
+    assert!(serialized.get("providerId").is_some());
+    assert!(serialized.get("apiKey").is_none());
+    assert!(serialized.get("api_key").is_none());
+    assert!(!serialized.to_string().contains("exportable-token"));
+}
+
+#[test]
+fn providers_json_import_rejects_bad_format() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("keep", "Keep", "https://keep.example"),
+    )
+    .expect("seed provider");
+
+    let err = db
+        .import_providers_json_string(r#"{"format":"not-cc-switch","version":1}"#)
+        .expect_err("bad envelope should fail");
+
+    assert!(
+        err.to_string().contains("供应商导入文件格式无效")
+            || err.to_string().contains("invalid provider export"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        provider_name(&db, "claude", "keep").as_deref(),
+        Some("Keep")
+    );
+}
+
+#[test]
+fn providers_json_import_rolls_back_on_transaction_failure() {
+    let db = Database::memory().expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("keep", "Keep", "https://keep.example"),
+    )
+    .expect("seed provider");
+    db.save_universal_provider(&make_universal_provider("universal-keep", "Universal Keep"))
+        .expect("seed universal");
+    {
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "INSERT OR REPLACE INTO provider_health
+             (provider_id, app_type, is_healthy, consecutive_failures, updated_at)
+             VALUES ('keep', 'claude', 0, 3, '2026-06-15T00:00:00Z')",
+            [],
+        )
+        .expect("seed health");
+    }
+
+    let mut bad_envelope: serde_json::Value =
+        serde_json::from_str(&db.export_providers_json_string().expect("export")).expect("json");
+    bad_envelope["providerEndpoints"] = json!([
+        {
+            "providerId": "keep",
+            "appType": "claude",
+            "url": "https://dup.example",
+            "addedAt": 1
+        },
+        {
+            "providerId": "keep",
+            "appType": "claude",
+            "url": "https://dup.example",
+            "addedAt": 2
+        }
+    ]);
+
+    let err = db
+        .import_providers_json_string(&bad_envelope.to_string())
+        .expect_err("duplicate endpoints should fail");
+
+    assert!(
+        err.to_string().contains("UNIQUE")
+            || err.to_string().contains("provider_endpoints")
+            || err.to_string().contains("duplicate provider endpoint")
+            || err.to_string().contains("导入供应商"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        provider_name(&db, "claude", "keep").as_deref(),
+        Some("Keep")
+    );
+    assert!(db
+        .get_universal_provider("universal-keep")
+        .expect("universal")
+        .is_some());
+    assert_eq!(scalar_count(&db, "SELECT COUNT(*) FROM provider_health"), 1);
+}
+
+#[test]
+fn providers_json_file_import_creates_database_backup_before_replace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("cc-switch.db");
+    let db = Database::init_at(&db_path).expect("db");
+    db.save_provider(
+        "claude",
+        &make_provider("file-provider", "File Provider", "https://file.example"),
+    )
+    .expect("seed provider");
+    let exported = db.export_providers_json_string().expect("export");
+
+    db.import_providers_json_string(&exported)
+        .expect("import should backup");
+
+    let backups_dir = temp.path().join("backups");
+    let backup_count = std::fs::read_dir(&backups_dir)
+        .expect("backups dir")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("db"))
+        .count();
+    assert!(
+        backup_count >= 1,
+        "expected at least one backup in {}",
+        backups_dir.display()
+    );
 }
 
 #[test]
@@ -830,4 +1512,53 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
         2,
         "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
+}
+
+#[test]
+fn user_agent_rewrite_config_defaults_and_rejects_invalid_regex() {
+    let db = Database::memory().expect("create memory db");
+
+    let default_config = db
+        .get_user_agent_rewrite_config()
+        .expect("default user agent rewrite config");
+    assert!(default_config.enabled);
+    assert!(default_config.matches("OpenAI/Python 2.24.0"));
+
+    let invalid = crate::proxy::types::UserAgentRewriteConfig {
+        enabled: true,
+        rules: vec![crate::proxy::types::UserAgentRewriteRule {
+            enabled: true,
+            pattern: "(".to_string(),
+        }],
+        ..crate::proxy::types::UserAgentRewriteConfig::default()
+    };
+
+    let err = db
+        .set_user_agent_rewrite_config(&invalid)
+        .expect_err("invalid regex should be rejected");
+    assert!(matches!(err, AppError::InvalidInput(_)));
+}
+
+#[test]
+fn user_agent_rewrite_config_backfills_targets_from_legacy_setting_json() {
+    let db = Database::memory().expect("create memory db");
+    db.set_setting(
+        "user_agent_rewrite_config",
+        r#"{"enabled":true,"rules":[{"enabled":true,"pattern":"^Legacy/.*$"}]}"#,
+    )
+    .expect("seed legacy user-agent rewrite config");
+
+    let config = db
+        .get_user_agent_rewrite_config()
+        .expect("legacy user agent rewrite config");
+
+    assert_eq!(
+        config.claude_target,
+        crate::proxy::types::default_claude_user_agent_rewrite_target()
+    );
+    assert_eq!(
+        config.codex_target,
+        crate::proxy::types::default_codex_user_agent_rewrite_target()
+    );
+    assert!(config.matches("Legacy/1.0"));
 }

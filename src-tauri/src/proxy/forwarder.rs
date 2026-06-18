@@ -18,13 +18,16 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
+    types::{
+        CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig,
+        UserAgentRewriteConfig,
+    },
     ProxyError,
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
-use crate::{app_config::AppType, provider::Provider};
+use crate::{app_config::AppType, database::Database, provider::Provider};
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
@@ -92,6 +95,7 @@ impl Drop for ActiveConnectionGuard {
 }
 
 pub struct RequestForwarder {
+    db: Arc<Database>,
     /// 共享的 ProviderRouter（持有熔断器状态）
     router: Arc<ProviderRouter>,
     status: Arc<RwLock<ProxyStatus>>,
@@ -114,6 +118,8 @@ pub struct RequestForwarder {
     optimizer_config: OptimizerConfig,
     /// Copilot 优化器配置
     copilot_optimizer_config: CopilotOptimizerConfig,
+    /// User-Agent 替换配置
+    user_agent_rewrite_config: UserAgentRewriteConfig,
     /// 非流式请求超时（秒）
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
@@ -172,8 +178,68 @@ impl RequestForwarder {
             && super::media_sanitizer::is_unsupported_image_error(error)
     }
 
+    fn image_generation_policy_retry_should_trigger(
+        adapter_name: &str,
+        app_type: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+        already_retried: bool,
+        provider_body: &Value,
+        error: &ProxyError,
+    ) -> bool {
+        matches!(adapter_name, "Claude" | "Codex")
+            && !already_retried
+            && provider.supports_image_generation_policy(app_type)
+            && match error {
+                ProxyError::UpstreamError { status, body } => {
+                    super::image_generation_policy::is_image_generation_disabled_403(
+                        *status,
+                        body.as_deref(),
+                    )
+                }
+                _ => false,
+            }
+            && super::image_generation_policy::request_has_image_generation_tool(
+                endpoint,
+                provider_body,
+            )
+    }
+
+    fn provider_with_image_generation_chat_policy(provider: &Provider) -> Provider {
+        let mut updated = provider.clone();
+        updated
+            .meta
+            .get_or_insert_with(Default::default)
+            .disable_image_generation = Some(crate::settings::DisableImageGenerationMode::Chat);
+        updated
+    }
+
+    fn persist_image_generation_chat_policy(&self, app_type: &AppType, provider: &Provider) {
+        let provider_to_save = match self.db.get_provider_by_id(&provider.id, app_type.as_str()) {
+            Ok(Some(current)) => Self::provider_with_image_generation_chat_policy(&current),
+            Ok(None) => provider.clone(),
+            Err(err) => {
+                log::warn!(
+                    "[{}] Failed to load latest provider {} before persisting image_generation policy: {err}",
+                    app_type.as_str(),
+                    provider.id
+                );
+                provider.clone()
+            }
+        };
+
+        if let Err(err) = self.db.save_provider(app_type.as_str(), &provider_to_save) {
+            log::warn!(
+                "[{}] Failed to persist image_generation policy for provider {}: {err}",
+                app_type.as_str(),
+                provider.id
+            );
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        db: Arc<Database>,
         router: Arc<ProviderRouter>,
         non_streaming_timeout: u64,
         status: Arc<RwLock<ProxyStatus>>,
@@ -190,12 +256,14 @@ impl RequestForwarder {
         rectifier_config: RectifierConfig,
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
+        user_agent_rewrite_config: UserAgentRewriteConfig,
         max_retries: u32,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            db,
             router,
             status,
             current_providers,
@@ -209,6 +277,7 @@ impl RequestForwarder {
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
+            user_agent_rewrite_config,
             non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
@@ -528,6 +597,112 @@ impl RequestForwarder {
                         ProviderType::Claude | ProviderType::ClaudeAuth
                     );
                     let mut signature_rectifier_non_retryable_client_error = false;
+
+                    if Self::image_generation_policy_retry_should_trigger(
+                        adapter.name(),
+                        app_type,
+                        provider,
+                        endpoint,
+                        false,
+                        &provider_body,
+                        &e,
+                    ) {
+                        let retry_provider =
+                            Self::provider_with_image_generation_chat_policy(provider);
+                        let mut retry_body = provider_body.clone();
+                        let changed = super::image_generation_policy::apply_image_generation_policy(
+                            super::image_generation_policy::ImageGenerationPolicyMode::Chat,
+                            endpoint,
+                            &mut retry_body,
+                        );
+
+                        if changed {
+                            log::info!(
+                                "[{app_type_str}] Upstream disabled image_generation for provider={}; retrying once without image_generation tools",
+                                provider.id
+                            );
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    &retry_provider,
+                                    endpoint,
+                                    &retry_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format, outbound_model)) => {
+                                    log::info!(
+                                        "[{app_type_str}] image_generation policy retry succeeded"
+                                    );
+                                    self.persist_image_generation_chat_policy(
+                                        app_type,
+                                        &retry_provider,
+                                    );
+                                    self.record_success_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+
+                                    {
+                                        let mut current_providers =
+                                            self.current_providers.write().await;
+                                        current_providers.insert(
+                                            app_type_str.to_string(),
+                                            (provider.id.clone(), provider.name.clone()),
+                                        );
+                                    }
+
+                                    {
+                                        let mut status = self.status.write().await;
+                                        status.success_requests += 1;
+                                        status.last_error = None;
+                                        let should_switch =
+                                            self.current_provider_id_at_start.as_str()
+                                                != provider.id.as_str();
+                                        if should_switch {
+                                            status.failover_count += 1;
+                                            let fm = self.failover_manager.clone();
+                                            let ah = self.app_handle.clone();
+                                            let pid = provider.id.clone();
+                                            let pname = provider.name.clone();
+                                            let at = app_type_str.to_string();
+
+                                            tokio::spawn(async move {
+                                                let _ = fm
+                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
+                                                    .await;
+                                            });
+                                        }
+                                        if status.total_requests > 0 {
+                                            status.success_rate = (status.success_requests as f32
+                                                / status.total_requests as f32)
+                                                * 100.0;
+                                        }
+                                    }
+
+                                    return Ok(ForwardResult {
+                                        response,
+                                        provider: retry_provider,
+                                        claude_api_format,
+                                        outbound_model,
+                                        connection_guard: None,
+                                    });
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] image_generation policy retry still failed; preserving original error path: {retry_err}"
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     if self.media_retry_should_trigger(
                         adapter.name(),
@@ -1341,6 +1516,17 @@ impl RequestForwarder {
             .filter(|m| !m.is_empty())
             .map(str::to_string);
 
+        if super::image_generation_policy::apply_image_generation_policy(
+            super::image_generation_policy::ImageGenerationPolicyMode::from_provider(provider),
+            &effective_endpoint,
+            &mut mapped_body,
+        ) {
+            let app_type_str = app_type.as_str();
+            log::info!(
+                "[{app_type_str}] Removed OpenAI image_generation tool before upstream request"
+            );
+        }
+
         // 转换请求体（如果需要）
         let mut request_body = if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
@@ -1724,14 +1910,23 @@ impl RequestForwarder {
                 continue;
             }
 
-            // --- user-agent: provider-level override for local proxy routing ---
+            // --- user-agent: global rewrite wins, then provider-level override, then passthrough ---
             if !is_copilot && key_str.eq_ignore_ascii_case("user-agent") {
                 if !saw_user_agent {
                     saw_user_agent = true;
-                    if let Some(ref ua) = custom_user_agent {
-                        ordered_headers.append(http::header::USER_AGENT, ua.clone());
-                    } else {
-                        ordered_headers.append(key.clone(), value.clone());
+                    let rewritten = append_rewritten_user_agent_if_matched(
+                        &mut ordered_headers,
+                        &http::header::USER_AGENT,
+                        value,
+                        app_type,
+                        &self.user_agent_rewrite_config,
+                    );
+                    if !rewritten {
+                        if let Some(ref ua) = custom_user_agent {
+                            ordered_headers.append(http::header::USER_AGENT, ua.clone());
+                        } else {
+                            ordered_headers.append(key.clone(), value.clone());
+                        }
                     }
                 }
                 continue;
@@ -2438,6 +2633,46 @@ fn build_codex_oauth_session_headers(
     headers
 }
 
+fn rewrite_user_agent_for_app(
+    app_type: &AppType,
+    user_agent: &str,
+    config: &UserAgentRewriteConfig,
+) -> Option<String> {
+    if !config.matches(user_agent) {
+        return None;
+    }
+
+    match app_type {
+        AppType::Claude => Some(config.claude_target.trim().to_string()),
+        AppType::Codex => Some(config.codex_target.trim().to_string()),
+        _ => None,
+    }
+}
+
+fn append_rewritten_user_agent_if_matched(
+    ordered_headers: &mut http::HeaderMap,
+    key: &http::HeaderName,
+    value: &http::HeaderValue,
+    app_type: &AppType,
+    config: &UserAgentRewriteConfig,
+) -> bool {
+    let Ok(user_agent) = value.to_str() else {
+        return false;
+    };
+
+    let Some(rewritten) = rewrite_user_agent_for_app(app_type, user_agent, config) else {
+        return false;
+    };
+
+    let Ok(rewritten) = http::HeaderValue::from_str(&rewritten) else {
+        log::warn!("跳过无效 User-Agent 目标值");
+        return false;
+    };
+
+    ordered_headers.append(key.clone(), rewritten);
+    true
+}
+
 fn reject_proxy_placeholder_for_managed_account_upstream(
     url: &str,
     headers: &http::HeaderMap,
@@ -2614,6 +2849,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn test_provider_with_type(provider_type: Option<&str>) -> Provider {
         Provider {
@@ -2642,6 +2878,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            db: db.clone(),
             router: Arc::new(ProviderRouter::new(db.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
@@ -2655,10 +2892,154 @@ mod tests {
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            user_agent_rewrite_config: UserAgentRewriteConfig::default(),
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    fn test_forwarder_with_db(
+        db: Arc<Database>,
+        non_streaming_timeout: Duration,
+        streaming_first_byte_timeout: Duration,
+    ) -> RequestForwarder {
+        RequestForwarder {
+            db: db.clone(),
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            user_agent_rewrite_config: UserAgentRewriteConfig::default(),
+            non_streaming_timeout,
+            streaming_first_byte_timeout,
+            max_attempts: 1,
+        }
+    }
+
+    async fn read_test_http_request(stream: &mut tokio::net::TcpStream) -> (String, Value) {
+        let mut buffer = Vec::new();
+        let mut temp = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut temp).await.expect("read request");
+            assert!(read > 0, "client closed before headers");
+            buffer.extend_from_slice(&temp[..read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+            })
+            .unwrap_or(0);
+
+        while buffer.len() < header_end + content_length {
+            let read = stream.read(&mut temp).await.expect("read request body");
+            assert!(read > 0, "client closed before full body");
+            buffer.extend_from_slice(&temp[..read]);
+        }
+
+        let body = if content_length == 0 {
+            Value::Null
+        } else {
+            serde_json::from_slice(&buffer[header_end..header_end + content_length])
+                .expect("parse request body")
+        };
+        (headers, body)
+    }
+
+    async fn write_test_http_response(stream: &mut tokio::net::TcpStream, status: u16, body: &str) {
+        let reason = match status {
+            200 => "OK",
+            403 => "Forbidden",
+            _ => "Test",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+    }
+
+    fn user_agent_header_values(headers: &str) -> Vec<String> {
+        headers
+            .lines()
+            .filter_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("user-agent")
+                        .then(|| value.trim().to_string())
+                })
+            })
+            .collect()
+    }
+
+    async fn capture_forwarded_headers<F>(
+        app_type: AppType,
+        make_provider: F,
+        endpoint: &str,
+        body: Value,
+        headers: HeaderMap,
+        user_agent_rewrite_config: UserAgentRewriteConfig,
+        response_body: &'static str,
+    ) -> String
+    where
+        F: FnOnce(std::net::SocketAddr) -> Provider,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test upstream");
+        let upstream_addr = listener.local_addr().expect("read listener addr");
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let (headers, _body) = read_test_http_request(&mut stream).await;
+            write_test_http_response(&mut stream, 200, response_body).await;
+            headers
+        });
+
+        let provider = make_provider(upstream_addr);
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(app_type.as_str(), &provider)
+            .expect("save provider");
+        let mut forwarder =
+            test_forwarder_with_db(db, Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.user_agent_rewrite_config = user_agent_rewrite_config;
+
+        if let Err(err) = forwarder
+            .forward_with_retry(
+                &app_type,
+                http::Method::POST,
+                endpoint,
+                body,
+                headers,
+                Extensions::new(),
+                vec![provider],
+            )
+            .await
+        {
+            panic!("forward request failed: {}", err.error);
+        }
+
+        upstream_task.await.expect("upstream task should complete")
     }
 
     #[test]
@@ -2896,6 +3277,509 @@ mod tests {
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
     }
 
+    #[tokio::test]
+    async fn image_generation_403_retries_without_tool_once_and_persists_provider_policy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test upstream");
+        let upstream_addr = listener.local_addr().expect("read listener addr");
+        let seen_bodies = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let seen_bodies_task = seen_bodies.clone();
+        let upstream_task = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let (_headers, body) = read_test_http_request(&mut stream).await;
+                seen_bodies_task.write().await.push(body.clone());
+                if attempt == 0 {
+                    write_test_http_response(
+                        &mut stream,
+                        403,
+                        r#"{"error":{"message":"Image generation is not enabled for this group"}}"#,
+                    )
+                    .await;
+                } else {
+                    assert!(
+                        body.get("tools").is_none(),
+                        "retry should remove empty image_generation tools array"
+                    );
+                    assert!(
+                        body.get("tool_choice").is_none(),
+                        "retry should remove image_generation tool_choice"
+                    );
+                    write_test_http_response(
+                        &mut stream,
+                        200,
+                        r#"{"id":"resp_1","object":"response","model":"gpt-5","output":[]}"#,
+                    )
+                    .await;
+                }
+            }
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(5), Duration::from_secs(5));
+        let mut provider = Provider::with_id(
+            "codex-custom".to_string(),
+            "Codex Custom".to_string(),
+            json!({
+                "base_url": format!("http://{upstream_addr}/v1"),
+                "apiKey": "sk-test"
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save provider");
+
+        let result = match forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                json!({
+                    "model": "gpt-5",
+                    "input": "draw",
+                    "tools": [{ "type": "image_generation" }],
+                    "tool_choice": { "type": "image_generation" }
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![provider.clone()],
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => panic!(
+                "image-generation recovery should retry and succeed: {}",
+                err.error
+            ),
+        };
+
+        assert_eq!(result.provider.id, "codex-custom");
+        upstream_task.await.expect("upstream task should complete");
+        let bodies = seen_bodies.read().await;
+        assert_eq!(bodies.len(), 2, "should only retry the same provider once");
+        assert!(
+            bodies[0]
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| tools.iter().any(|tool| {
+                    tool.get("type").and_then(Value::as_str) == Some("image_generation")
+                })),
+            "initial request should include image_generation"
+        );
+        drop(bodies);
+
+        let saved = db
+            .get_provider_by_id("codex-custom", AppType::Codex.as_str())
+            .expect("query provider")
+            .expect("provider exists");
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.disable_image_generation),
+            Some(crate::settings::DisableImageGenerationMode::Chat)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_generation_403_retry_failure_preserves_original_error_and_does_not_persist() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test upstream");
+        let upstream_addr = listener.local_addr().expect("read listener addr");
+        let seen_bodies = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let seen_bodies_task = seen_bodies.clone();
+        let upstream_task = tokio::spawn(async move {
+            for _attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let (_headers, body) = read_test_http_request(&mut stream).await;
+                seen_bodies_task.write().await.push(body);
+                write_test_http_response(
+                    &mut stream,
+                    403,
+                    r#"{"error":{"message":"Image generation is not enabled for this group"}}"#,
+                )
+                .await;
+            }
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(5), Duration::from_secs(5));
+        let mut provider = Provider::with_id(
+            "codex-custom".to_string(),
+            "Codex Custom".to_string(),
+            json!({
+                "base_url": format!("http://{upstream_addr}/v1"),
+                "apiKey": "sk-test"
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save provider");
+
+        let err = match forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                json!({
+                    "model": "gpt-5",
+                    "input": "draw",
+                    "tools": [{ "type": "image_generation" }]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![provider],
+            )
+            .await
+        {
+            Ok(_) => panic!("retry failure should preserve the original error path"),
+            Err(err) => err,
+        };
+
+        upstream_task.await.expect("upstream task should complete");
+        assert!(matches!(
+            err.error,
+            ProxyError::UpstreamError { status: 403, .. }
+        ));
+        assert_eq!(
+            seen_bodies.read().await.len(),
+            2,
+            "failed recovery should only retry once"
+        );
+        let saved = db
+            .get_provider_by_id("codex-custom", AppType::Codex.as_str())
+            .expect("query provider")
+            .expect("provider exists");
+        assert!(
+            saved
+                .meta
+                .and_then(|meta| meta.disable_image_generation)
+                .is_none(),
+            "failed recovery must not persist the policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_generation_403_retry_failure_continues_failover_with_original_error_path() {
+        let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind primary upstream");
+        let primary_addr = primary_listener.local_addr().expect("read primary addr");
+        let primary_bodies = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let primary_bodies_task = primary_bodies.clone();
+        let primary_task = tokio::spawn(async move {
+            for _attempt in 0..2 {
+                let (mut stream, _) = primary_listener.accept().await.expect("accept primary");
+                let (_headers, body) = read_test_http_request(&mut stream).await;
+                primary_bodies_task.write().await.push(body);
+                write_test_http_response(
+                    &mut stream,
+                    403,
+                    r#"{"error":{"message":"Image generation is not enabled for this group"}}"#,
+                )
+                .await;
+            }
+        });
+
+        let backup_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind backup upstream");
+        let backup_addr = backup_listener.local_addr().expect("read backup addr");
+        let backup_bodies = Arc::new(RwLock::new(Vec::<Value>::new()));
+        let backup_bodies_task = backup_bodies.clone();
+        let backup_task = tokio::spawn(async move {
+            let (mut stream, _) = backup_listener.accept().await.expect("accept backup");
+            let (_headers, body) = read_test_http_request(&mut stream).await;
+            backup_bodies_task.write().await.push(body);
+            write_test_http_response(
+                &mut stream,
+                200,
+                r#"{"id":"resp_backup","object":"response","model":"gpt-5","output":[]}"#,
+            )
+            .await;
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(5), Duration::from_secs(5));
+        forwarder.max_attempts = 2;
+
+        let mut primary = Provider::with_id(
+            "codex-primary".to_string(),
+            "Codex Primary".to_string(),
+            json!({
+                "base_url": format!("http://{primary_addr}/v1"),
+                "apiKey": "sk-primary"
+            }),
+            None,
+        );
+        primary.category = Some("custom".to_string());
+        primary.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &primary)
+            .expect("save primary");
+
+        let mut backup = Provider::with_id(
+            "codex-backup".to_string(),
+            "Codex Backup".to_string(),
+            json!({
+                "base_url": format!("http://{backup_addr}/v1"),
+                "apiKey": "sk-backup"
+            }),
+            None,
+        );
+        backup.category = Some("custom".to_string());
+        backup.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &backup)
+            .expect("save backup");
+
+        let result = match forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                json!({
+                    "model": "gpt-5",
+                    "input": "draw",
+                    "tools": [{ "type": "image_generation" }]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![primary.clone(), backup],
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => panic!(
+                "failed image-generation recovery should still fail over: {}",
+                err.error
+            ),
+        };
+
+        primary_task.await.expect("primary task should complete");
+        backup_task.await.expect("backup task should complete");
+
+        assert_eq!(result.provider.id, "codex-backup");
+        assert_eq!(
+            primary_bodies.read().await.len(),
+            2,
+            "primary should receive original request plus one policy retry"
+        );
+        assert_eq!(
+            backup_bodies.read().await.len(),
+            1,
+            "backup provider should be attempted after primary recovery fails"
+        );
+        let saved_primary = db
+            .get_provider_by_id("codex-primary", AppType::Codex.as_str())
+            .expect("query primary")
+            .expect("primary exists");
+        assert!(
+            saved_primary
+                .meta
+                .and_then(|meta| meta.disable_image_generation)
+                .is_none(),
+            "failed primary recovery must not persist policy"
+        );
+    }
+
+    #[test]
+    fn image_generation_policy_persistence_preserves_latest_provider_row_fields() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(5), Duration::from_secs(5));
+
+        let mut original = Provider::with_id(
+            "codex-custom".to_string(),
+            "Original Name".to_string(),
+            json!({
+                "base_url": "https://api.example.com/v1",
+                "apiKey": "sk-test"
+            }),
+            None,
+        );
+        original.category = Some("custom".to_string());
+        original.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &original)
+            .expect("save original provider");
+
+        let retry_provider =
+            RequestForwarder::provider_with_image_generation_chat_policy(&original);
+
+        let mut latest = original.clone();
+        latest.name = "Updated Name".to_string();
+        latest.notes = Some("operator edited while request was in flight".to_string());
+        db.save_provider(AppType::Codex.as_str(), &latest)
+            .expect("save concurrent provider edit");
+
+        forwarder.persist_image_generation_chat_policy(&AppType::Codex, &retry_provider);
+
+        let saved = db
+            .get_provider_by_id("codex-custom", AppType::Codex.as_str())
+            .expect("query provider")
+            .expect("provider exists");
+        assert_eq!(saved.name, "Updated Name");
+        assert_eq!(
+            saved.notes.as_deref(),
+            Some("operator edited while request was in flight")
+        );
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.disable_image_generation),
+            Some(crate::settings::DisableImageGenerationMode::Chat)
+        );
+    }
+
+    #[test]
+    fn image_generation_policy_retry_trigger_is_narrow() {
+        let mut provider = Provider::with_id(
+            "codex-custom".to_string(),
+            "Codex Custom".to_string(),
+            json!({}),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let body = json!({
+            "model": "gpt-5",
+            "tools": [{ "type": "image_generation" }]
+        });
+        let target_error = ProxyError::UpstreamError {
+            status: 403,
+            body: Some(
+                r#"{"error":{"message":"Image generation is not enabled for this group"}}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(
+            RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &provider,
+                "/v1/responses",
+                false,
+                &body,
+                &target_error,
+            )
+        );
+
+        let other_403 = ProxyError::UpstreamError {
+            status: 403,
+            body: Some(r#"{"error":{"message":"permission denied"}}"#.to_string()),
+        };
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &provider,
+                "/v1/responses",
+                false,
+                &body,
+                &other_403,
+            )
+        );
+
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &provider,
+                "/v1/responses",
+                false,
+                &json!({ "model": "gpt-5", "tools": [{ "type": "function", "name": "read_file" }] }),
+                &target_error,
+            )
+        );
+
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &provider,
+                "/v1/images/generations",
+                false,
+                &body,
+                &target_error,
+            )
+        );
+
+        let mut official = provider.clone();
+        official.category = Some("official".to_string());
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &official,
+                "/v1/responses",
+                false,
+                &body,
+                &target_error,
+            )
+        );
+
+        let mut copilot = provider.clone();
+        copilot.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        });
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &copilot,
+                "/v1/responses",
+                false,
+                &body,
+                &target_error,
+            )
+        );
+
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Gemini",
+                &AppType::Gemini,
+                &provider,
+                "/v1/responses",
+                false,
+                &body,
+                &target_error,
+            )
+        );
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Codex",
+                &AppType::Codex,
+                &provider,
+                "/v1/responses",
+                true,
+                &body,
+                &target_error,
+            )
+        );
+    }
+
     #[test]
     fn codex_oauth_session_headers_match_codex_cache_identity() {
         let headers = build_codex_oauth_session_headers("session-123");
@@ -2971,6 +3855,237 @@ mod tests {
             &headers,
         )
         .expect("guard is scoped to managed-account upstreams");
+    }
+
+    #[test]
+    fn user_agent_rewrite_replaces_default_openai_python_for_claude_and_codex() {
+        let config = UserAgentRewriteConfig {
+            claude_target: "claude-custom/1.0".to_string(),
+            codex_target: "codex-custom/2.0".to_string(),
+            ..UserAgentRewriteConfig::default()
+        };
+
+        assert_eq!(
+            rewrite_user_agent_for_app(&AppType::Claude, "OpenAI/Python 2.24.0", &config),
+            Some("claude-custom/1.0".to_string())
+        );
+        assert_eq!(
+            rewrite_user_agent_for_app(&AppType::Codex, "OpenAI/Python 2.999.10", &config),
+            Some("codex-custom/2.0".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn user_agent_rewrite_forwarding_overrides_provider_custom_user_agent_for_claude() {
+        let config = UserAgentRewriteConfig {
+            claude_target: "claude_target".to_string(),
+            codex_target: "codex_target".to_string(),
+            ..UserAgentRewriteConfig::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("OpenAI/Python 2.24.0"),
+        );
+
+        let outbound_headers = capture_forwarded_headers(
+            AppType::Claude,
+            |upstream_addr| {
+                let mut provider = Provider::with_id(
+                    "claude-custom".to_string(),
+                    "Claude Custom".to_string(),
+                    json!({
+                        "env": {
+                            "ANTHROPIC_BASE_URL": format!("http://{upstream_addr}/v1"),
+                            "ANTHROPIC_API_KEY": "sk-test"
+                        }
+                    }),
+                    None,
+                );
+                provider.category = Some("custom".to_string());
+                provider.meta = Some(crate::provider::ProviderMeta {
+                    api_format: Some("anthropic".to_string()),
+                    custom_user_agent: Some("provider-custom/9.9".to_string()),
+                    ..Default::default()
+                });
+                provider
+            },
+            "/v1/messages",
+            json!({
+                "model": "claude-3-5-sonnet-latest",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hello" }]
+            }),
+            headers,
+            config,
+            r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-latest","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .await;
+
+        let user_agents = user_agent_header_values(&outbound_headers);
+        assert_eq!(user_agents, vec!["claude_target".to_string()]);
+        assert!(
+            !user_agents
+                .iter()
+                .any(|value| value == "OpenAI/Python 2.24.0"),
+            "matched client User-Agent must not leak upstream"
+        );
+        assert!(
+            !user_agents
+                .iter()
+                .any(|value| value == "provider-custom/9.9"),
+            "global rewrite must win over provider custom User-Agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_agent_rewrite_forwarding_overrides_provider_custom_user_agent_for_codex() {
+        let config = UserAgentRewriteConfig {
+            claude_target: "claude_target".to_string(),
+            codex_target: "codex_target".to_string(),
+            ..UserAgentRewriteConfig::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("OpenAI/Python 2.24.0"),
+        );
+
+        let outbound_headers = capture_forwarded_headers(
+            AppType::Codex,
+            |upstream_addr| {
+                let mut provider = Provider::with_id(
+                    "codex-custom".to_string(),
+                    "Codex Custom".to_string(),
+                    json!({
+                        "base_url": format!("http://{upstream_addr}/v1"),
+                        "apiKey": "sk-test"
+                    }),
+                    None,
+                );
+                provider.category = Some("custom".to_string());
+                provider.meta = Some(crate::provider::ProviderMeta {
+                    custom_user_agent: Some("provider-custom/9.9".to_string()),
+                    ..Default::default()
+                });
+                provider
+            },
+            "/v1/responses",
+            json!({ "model": "gpt-5", "input": "hello" }),
+            headers,
+            config,
+            r#"{"id":"resp_1","object":"response","model":"gpt-5","output":[]}"#,
+        )
+        .await;
+
+        let user_agents = user_agent_header_values(&outbound_headers);
+        assert_eq!(user_agents, vec!["codex_target".to_string()]);
+        assert!(
+            !user_agents
+                .iter()
+                .any(|value| value == "OpenAI/Python 2.24.0"),
+            "matched client User-Agent must not leak upstream"
+        );
+        assert!(
+            !user_agents
+                .iter()
+                .any(|value| value == "provider-custom/9.9"),
+            "global rewrite must win over provider custom User-Agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_agent_rewrite_forwarding_keeps_provider_custom_user_agent_when_not_matching() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("curl/8.7.1"),
+        );
+
+        let outbound_headers = capture_forwarded_headers(
+            AppType::Codex,
+            |upstream_addr| {
+                let mut provider = Provider::with_id(
+                    "codex-custom".to_string(),
+                    "Codex Custom".to_string(),
+                    json!({
+                        "base_url": format!("http://{upstream_addr}/v1"),
+                        "apiKey": "sk-test"
+                    }),
+                    None,
+                );
+                provider.category = Some("custom".to_string());
+                provider.meta = Some(crate::provider::ProviderMeta {
+                    custom_user_agent: Some("provider-custom/9.9".to_string()),
+                    ..Default::default()
+                });
+                provider
+            },
+            "/v1/responses",
+            json!({ "model": "gpt-5", "input": "hello" }),
+            headers,
+            UserAgentRewriteConfig::default(),
+            r#"{"id":"resp_1","object":"response","model":"gpt-5","output":[]}"#,
+        )
+        .await;
+
+        assert_eq!(
+            user_agent_header_values(&outbound_headers),
+            vec!["provider-custom/9.9".to_string()],
+            "provider custom User-Agent should still cover non-matching client values"
+        );
+    }
+
+    #[test]
+    fn user_agent_rewrite_does_not_apply_to_claude_desktop_or_non_matching_values() {
+        let config = UserAgentRewriteConfig::default();
+
+        assert_eq!(
+            rewrite_user_agent_for_app(&AppType::ClaudeDesktop, "OpenAI/Python 2.24.0", &config),
+            None
+        );
+        assert_eq!(
+            rewrite_user_agent_for_app(&AppType::Claude, "claude-cli/2.1.173", &config),
+            None
+        );
+    }
+
+    #[test]
+    fn user_agent_header_rewrite_preserves_missing_and_non_matching_values() {
+        let config = UserAgentRewriteConfig::default();
+        let key = http::header::USER_AGENT;
+
+        let mut rewritten_headers = HeaderMap::new();
+        assert!(append_rewritten_user_agent_if_matched(
+            &mut rewritten_headers,
+            &key,
+            &HeaderValue::from_static("OpenAI/Python 2.24.0"),
+            &AppType::Claude,
+            &config,
+        ));
+        assert_eq!(
+            rewritten_headers.get(http::header::USER_AGENT),
+            Some(&HeaderValue::from_str(&config.claude_target).unwrap())
+        );
+
+        let mut non_matching_headers = HeaderMap::new();
+        assert!(!append_rewritten_user_agent_if_matched(
+            &mut non_matching_headers,
+            &key,
+            &HeaderValue::from_static("curl/8.7.1"),
+            &AppType::Claude,
+            &config,
+        ));
+        assert!(
+            !non_matching_headers.contains_key(http::header::USER_AGENT),
+            "helper should not append when the incoming User-Agent does not match"
+        );
+
+        let missing_headers = HeaderMap::new();
+        assert!(
+            !missing_headers.contains_key(http::header::USER_AGENT),
+            "missing User-Agent stays missing"
+        );
     }
 
     #[test]

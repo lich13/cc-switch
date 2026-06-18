@@ -14,6 +14,13 @@ use support::{
     ensure_test_home, reset_test_fs, test_mutex,
 };
 
+fn assert_codex_live_write_disabled(err: AppError) {
+    match err {
+        AppError::Localized { key, .. } => assert_eq!(key, "codex.live.write_disabled"),
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
 #[test]
 fn sync_claude_provider_writes_live_settings() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -71,16 +78,21 @@ fn sync_claude_provider_writes_live_settings() {
 }
 
 #[test]
-fn sync_codex_provider_writes_config_without_touching_auth() {
+fn sync_codex_provider_live_write_is_disabled_without_touching_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    let config_path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    let original_auth = r#"{"OPENAI_API_KEY":"original"}"#;
+    let original_config = "model_provider = \"openai\"\n";
+    fs::write(&auth_path, original_auth).expect("seed auth.json");
+    fs::write(&config_path, original_config).expect("seed config.toml");
 
     let mut config = MultiAppConfig::default();
-
-    // 注意：v3.7.0 后 MCP 同步由 McpService 独立处理，不再通过 provider 切换触发
-    // Codex provider 切换只写 config.toml；auth.json 保留用户登录态。
-
     let provider_config = json!({
         "auth": {
             "OPENAI_API_KEY": "codex-key"
@@ -101,30 +113,16 @@ fn sync_codex_provider_writes_config_without_touching_auth() {
     manager.providers.insert("codex-1".to_string(), provider);
     manager.current = "codex-1".to_string();
 
-    ConfigService::sync_current_providers_to_live(&mut config).expect("sync codex live");
-
-    let auth_path = cc_switch_lib::get_codex_auth_path();
-    let config_path = cc_switch_lib::get_codex_config_path();
-
-    assert!(
-        !auth_path.exists(),
-        "auth.json should not be created by provider switching at {}",
-        auth_path.display()
+    let err = ConfigService::sync_current_providers_to_live(&mut config)
+        .expect_err("Codex live sync should be disabled");
+    assert_codex_live_write_disabled(err);
+    assert_eq!(
+        fs::read_to_string(&auth_path).expect("read auth.json"),
+        original_auth
     );
-    assert!(
-        config_path.exists(),
-        "config.toml should exist at {}",
-        config_path.display()
-    );
-
-    let toml_text = fs::read_to_string(&config_path).expect("read config.toml");
-    assert!(
-        toml_text.contains("base_url"),
-        "config.toml should contain base_url from provider config"
-    );
-    assert!(
-        toml_text.contains("experimental_bearer_token"),
-        "config.toml should contain provider-scoped bearer token"
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read config.toml"),
+        original_config
     );
 
     let manager = config.get_manager(&AppType::Codex).expect("codex manager");
@@ -136,19 +134,12 @@ fn sync_codex_provider_writes_config_without_touching_auth() {
         .expect("config string");
     assert!(
         !synced_cfg.contains("experimental_bearer_token"),
-        "provider storage should not persist generated live bearer token"
-    );
-    assert!(
-        toml_text.contains("experimental_bearer_token"),
-        "live config should include generated bearer token"
+        "provider storage should not be changed by disabled live sync"
     );
 }
 
 #[test]
-fn sync_codex_provider_with_config_only_token_backfills_auth() {
-    // P2-2 回归: stored provider 的 token 只藏在 config.toml 的 experimental_bearer_token 时,
-    // sync 路径必须把 token 从 live config 提取并写回 stored auth.OPENAI_API_KEY,
-    // 否则下一轮 sync 会在 cleaned config + 空 auth 之间丢失 token。
+fn sync_codex_provider_with_config_only_token_does_not_backfill_when_live_write_disabled() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
@@ -183,7 +174,9 @@ experimental_bearer_token = "stored-bearer-key"
         .insert("thirdparty-1".to_string(), provider);
     manager.current = "thirdparty-1".to_string();
 
-    ConfigService::sync_current_providers_to_live(&mut config).expect("sync codex live");
+    let err = ConfigService::sync_current_providers_to_live(&mut config)
+        .expect_err("Codex live sync should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let manager = config.get_manager(&AppType::Codex).expect("codex manager");
     let synced = manager
@@ -196,8 +189,8 @@ experimental_bearer_token = "stored-bearer-key"
             .settings_config
             .pointer("/auth/OPENAI_API_KEY")
             .and_then(|v| v.as_str()),
-        Some("stored-bearer-key"),
-        "config-only bearer token must be backfilled into stored auth.OPENAI_API_KEY"
+        None,
+        "disabled live sync should not backfill stored auth"
     );
 
     let synced_cfg = synced
@@ -206,17 +199,22 @@ experimental_bearer_token = "stored-bearer-key"
         .and_then(|v| v.as_str())
         .expect("config string");
     assert!(
-        !synced_cfg.contains("experimental_bearer_token"),
-        "live-only bearer token should not be persisted in stored provider config"
+        synced_cfg.contains("experimental_bearer_token"),
+        "disabled live sync should not rewrite stored config"
     );
 }
 
 #[test]
-fn sync_codex_provider_preserves_user_model_provider_id_after_migration() {
+fn sync_codex_provider_preserves_live_files_when_write_disabled() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
-    let legacy_auth = json!({ "OPENAI_API_KEY": "rightcode-key" });
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    let config_path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    let legacy_auth = r#"{"OPENAI_API_KEY":"rightcode-key"}"#;
     let legacy_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
 
@@ -226,8 +224,8 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    cc_switch_lib::write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing Codex live config");
+    fs::write(&auth_path, legacy_auth).expect("seed auth.json");
+    fs::write(&config_path, legacy_config).expect("seed config.toml");
 
     let mut config = MultiAppConfig::default();
     let provider_config = json!({
@@ -258,52 +256,24 @@ requires_openai_auth = true
     manager.providers.insert("codex-1".to_string(), provider);
     manager.current = "codex-1".to_string();
 
-    ConfigService::sync_current_providers_to_live(&mut config).expect("sync codex live");
-
-    let toml_text =
-        fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    let parsed: toml::Value = toml::from_str(&toml_text).expect("parse config.toml");
-
+    let err = ConfigService::sync_current_providers_to_live(&mut config)
+        .expect_err("Codex live sync should be disabled");
+    assert_codex_live_write_disabled(err);
     assert_eq!(
-        parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "ConfigService sync should preserve user-editable model_provider after the one-time migration"
-    );
-
-    let model_providers = parsed
-        .get("model_providers")
-        .and_then(|v| v.as_table())
-        .expect("model_providers should exist");
-    assert!(
-        model_providers.get("custom").is_none(),
-        "provider sync should not force user-edited provider ids back to custom"
+        fs::read_to_string(&auth_path).expect("read auth.json"),
+        legacy_auth
     );
     assert_eq!(
-        model_providers
-            .get("aihubmix")
-            .and_then(|v| v.get("base_url"))
-            .and_then(|v| v.as_str()),
-        Some("https://aihubmix.example/v1")
-    );
-
-    let synced_cfg = config
-        .get_manager(&AppType::Codex)
-        .and_then(|manager| manager.providers.get("codex-1"))
-        .and_then(|provider| provider.settings_config.get("config"))
-        .and_then(|v| v.as_str())
-        .expect("synced config string");
-    assert!(
-        synced_cfg.contains("[model_providers.aihubmix]"),
-        "ConfigService should restore the provider-specific id before writing stored config"
+        fs::read_to_string(&config_path).expect("read config.toml"),
+        legacy_config
     );
 }
 
 #[test]
-fn sync_enabled_to_codex_writes_enabled_servers() {
+fn sync_enabled_to_codex_returns_disabled_without_creating_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
-    // 模拟 Codex 已安装/已初始化：存在 ~/.codex 目录
     let path = cc_switch_lib::get_codex_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
@@ -323,22 +293,17 @@ fn sync_enabled_to_codex_writes_enabled_servers() {
         }),
     );
 
-    cc_switch_lib::sync_enabled_to_codex(&config).expect("sync codex");
-
-    assert!(path.exists(), "config.toml should be created");
-    let text = fs::read_to_string(&path).expect("read config.toml");
-    assert!(
-        text.contains("mcp_servers") && text.contains("stdio-enabled"),
-        "enabled servers should be serialized"
-    );
+    let err = cc_switch_lib::sync_enabled_to_codex(&config)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
+    assert!(!path.exists(), "config.toml should not be created");
 }
 
 #[test]
-fn sync_enabled_to_codex_preserves_non_mcp_content_and_style() {
+fn sync_enabled_to_codex_returns_disabled_and_preserves_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
-    // 预置含有顶层注释与非 MCP 键的 config.toml
     let path = cc_switch_lib::get_codex_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
@@ -351,7 +316,6 @@ mode = "dev"
 "#;
     fs::write(&path, seed).expect("seed config.toml");
 
-    // 启用一个 MCP 项，触发增量写入
     let mut config = MultiAppConfig::default();
     config.mcp.codex.servers.insert(
         "echo".into(),
@@ -362,45 +326,22 @@ mode = "dev"
         }),
     );
 
-    cc_switch_lib::sync_enabled_to_codex(&config).expect("sync codex");
+    let err = cc_switch_lib::sync_enabled_to_codex(&config)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let text = fs::read_to_string(&path).expect("read config.toml");
-    // 顶层注释与非 MCP 键应保留
-    assert!(
-        text.contains("# top-comment"),
-        "top comment should be preserved"
-    );
-    assert!(
-        text.contains("title = \"keep-me\""),
-        "top key should be preserved"
-    );
-    assert!(
-        text.contains("[profile]"),
-        "non-MCP table should be preserved"
-    );
-    assert!(
-        text.contains("mcp_servers"),
-        "mcp_servers table should be present"
-    );
-    assert!(
-        !text.contains("[mcp.servers]"),
-        "invalid [mcp.servers] table should not appear"
-    );
-    assert!(
-        text.contains("echo") && text.contains("command = \"echo\""),
-        "echo server should be serialized"
-    );
+    assert_eq!(text, seed, "config.toml should remain byte-equivalent");
 }
 
 #[test]
-fn sync_enabled_to_codex_migrates_erroneous_mcp_dot_servers_to_mcp_servers() {
+fn sync_enabled_to_codex_does_not_migrate_when_write_disabled() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let path = cc_switch_lib::get_codex_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
     }
-    // 预置错误的 mcp.servers 风格（应迁移为顶层 mcp_servers）
     let seed = r#"[mcp]
   other = "keep"
   [mcp.servers]
@@ -417,21 +358,15 @@ fn sync_enabled_to_codex_migrates_erroneous_mcp_dot_servers_to_mcp_servers() {
         }),
     );
 
-    cc_switch_lib::sync_enabled_to_codex(&config).expect("sync codex");
+    let err = cc_switch_lib::sync_enabled_to_codex(&config)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
     let text = fs::read_to_string(&path).expect("read config.toml");
-    // 应迁移到顶层 mcp_servers，并移除错误的 mcp.servers 表
-    assert!(
-        text.contains("mcp_servers"),
-        "should migrate to mcp_servers table"
-    );
-    assert!(
-        !text.contains("[mcp.servers]"),
-        "invalid [mcp.servers] table should be removed"
-    );
+    assert_eq!(text, seed, "config.toml should remain byte-equivalent");
 }
 
 #[test]
-fn sync_enabled_to_codex_removes_servers_when_none_enabled() {
+fn sync_enabled_to_codex_does_not_remove_servers_when_write_disabled() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let path = cc_switch_lib::get_codex_config_path();
@@ -445,19 +380,19 @@ disabled = { type = "stdio", command = "noop" }
 "#,
     )
     .expect("seed config file");
+    let original = fs::read_to_string(&path).expect("read seeded config.toml");
 
     let config = MultiAppConfig::default(); // 无启用项
-    cc_switch_lib::sync_enabled_to_codex(&config).expect("sync codex");
+    let err = cc_switch_lib::sync_enabled_to_codex(&config)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let text = fs::read_to_string(&path).expect("read config.toml");
-    assert!(
-        !text.contains("mcp_servers") && !text.contains("servers"),
-        "disabled entries should be removed from config.toml"
-    );
+    assert_eq!(text, original, "config.toml should remain byte-equivalent");
 }
 
 #[test]
-fn sync_enabled_to_codex_returns_error_on_invalid_toml() {
+fn sync_enabled_to_codex_returns_disabled_before_reading_invalid_toml() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let path = cc_switch_lib::get_codex_config_path();
@@ -479,26 +414,17 @@ fn sync_enabled_to_codex_returns_error_on_invalid_toml() {
         }),
     );
 
-    let err = cc_switch_lib::sync_enabled_to_codex(&config).expect_err("sync should fail");
-    match err {
-        cc_switch_lib::AppError::Toml { path, .. } => {
-            assert!(
-                path.ends_with("config.toml"),
-                "path should reference config.toml"
-            );
-        }
-        cc_switch_lib::AppError::McpValidation(msg) => {
-            assert!(
-                msg.contains("config.toml"),
-                "error message should mention config.toml"
-            );
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    let err = cc_switch_lib::sync_enabled_to_codex(&config)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
+    assert_eq!(
+        fs::read_to_string(&path).expect("read config.toml"),
+        "invalid = ["
+    );
 }
 
 #[test]
-fn sync_codex_provider_missing_auth_returns_error() {
+fn sync_codex_provider_missing_auth_returns_disabled_before_validation() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
@@ -519,14 +445,8 @@ fn sync_codex_provider_missing_auth_returns_error() {
 
     let err = ConfigService::sync_current_providers_to_live(&mut config)
         .expect_err("sync should fail when auth missing");
-    match err {
-        cc_switch_lib::AppError::Config(msg) => {
-            assert!(msg.contains("auth"), "error message should mention auth");
-        }
-        other => panic!("unexpected error variant: {other:?}"),
-    }
+    assert_codex_live_write_disabled(err);
 
-    // 确认未产生任何 live 配置文件
     assert!(
         !cc_switch_lib::get_codex_auth_path().exists(),
         "auth.json should not be created on failure"
@@ -538,7 +458,7 @@ fn sync_codex_provider_missing_auth_returns_error() {
 }
 
 #[test]
-fn write_codex_live_atomic_persists_auth_and_config() {
+fn write_codex_live_atomic_returns_disabled_without_creating_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
@@ -550,27 +470,18 @@ command = "echo"
 args = ["ok"]
 "#;
 
-    cc_switch_lib::write_codex_live_atomic(&auth, Some(config_text))
-        .expect("atomic write should succeed");
+    let err = cc_switch_lib::write_codex_live_atomic(&auth, Some(config_text))
+        .expect_err("Codex live write should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
     let config_path = cc_switch_lib::get_codex_config_path();
-    assert!(auth_path.exists(), "auth.json should be created");
-    assert!(config_path.exists(), "config.toml should be created");
-
-    let stored_auth: serde_json::Value =
-        cc_switch_lib::read_json_file(&auth_path).expect("read auth");
-    assert_eq!(stored_auth, auth, "auth.json should match input");
-
-    let stored_config = std::fs::read_to_string(&config_path).expect("read config");
-    assert!(
-        stored_config.contains("mcp_servers.echo"),
-        "config.toml should contain serialized table"
-    );
+    assert!(!auth_path.exists(), "auth.json should not be created");
+    assert!(!config_path.exists(), "config.toml should not be created");
 }
 
 #[test]
-fn write_codex_live_atomic_rolls_back_auth_when_config_write_fails() {
+fn write_codex_live_atomic_returns_disabled_and_preserves_existing_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
@@ -578,10 +489,11 @@ fn write_codex_live_atomic_rolls_back_auth_when_config_write_fails() {
     if let Some(parent) = auth_path.parent() {
         std::fs::create_dir_all(parent).expect("create codex dir");
     }
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"legacy"}"#).expect("seed auth");
-
+    let original_auth = r#"{"OPENAI_API_KEY":"legacy"}"#;
+    let original_config = "model = \"gpt-5\"\n";
+    std::fs::write(&auth_path, original_auth).expect("seed auth");
     let config_path = cc_switch_lib::get_codex_config_path();
-    std::fs::create_dir_all(&config_path).expect("create blocking directory");
+    std::fs::write(&config_path, original_config).expect("seed config");
 
     let auth = json!({ "OPENAI_API_KEY": "new-key" });
     let config_text = r#"[mcp_servers.sample]
@@ -590,34 +502,13 @@ command = "noop"
 "#;
 
     let err = cc_switch_lib::write_codex_live_atomic(&auth, Some(config_text))
-        .expect_err("config write should fail when target is directory");
-    match err {
-        cc_switch_lib::AppError::Io { path, .. } => {
-            assert!(
-                path.ends_with("config.toml"),
-                "io error path should point to config.toml"
-            );
-        }
-        cc_switch_lib::AppError::IoContext { context, .. } => {
-            assert!(
-                context.contains("config.toml"),
-                "error context should mention config path"
-            );
-        }
-        other => panic!("unexpected error variant: {other:?}"),
-    }
+        .expect_err("Codex live write should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let stored = std::fs::read_to_string(&auth_path).expect("read existing auth");
-    assert!(
-        stored.contains("legacy"),
-        "auth.json should roll back to legacy content"
-    );
-    assert!(
-        std::fs::metadata(&config_path)
-            .expect("config path metadata")
-            .is_dir(),
-        "config path should remain a directory after failure"
-    );
+    assert_eq!(stored, original_auth);
+    let stored_config = std::fs::read_to_string(&config_path).expect("read existing config");
+    assert_eq!(stored_config, original_config);
 }
 
 #[test]

@@ -146,6 +146,8 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
+        crate::codex_config::reject_codex_live_write()?;
+
         let settings = provider.settings_config.as_object().ok_or_else(|| {
             AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
         })?;

@@ -109,6 +109,41 @@ impl Provider {
             .unwrap_or(false)
     }
 
+    pub fn supports_image_generation_policy(&self, app_type: &crate::app_config::AppType) -> bool {
+        if self.category.as_deref() == Some("official")
+            || self.is_codex_oauth()
+            || self.is_github_copilot()
+        {
+            return false;
+        }
+
+        match app_type {
+            crate::app_config::AppType::Codex => true,
+            crate::app_config::AppType::ClaudeDesktop
+                if self
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.claude_desktop_mode.as_ref())
+                    != Some(&ClaudeDesktopMode::Proxy) =>
+            {
+                false
+            }
+            crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
+                matches!(
+                    self.meta
+                        .as_ref()
+                        .and_then(|meta| meta.api_format.as_deref())
+                        .or_else(|| self
+                            .settings_config
+                            .get("api_format")
+                            .and_then(|v| v.as_str())),
+                    Some("openai_chat" | "openai_responses")
+                )
+            }
+            _ => false,
+        }
+    }
+
     /// Resolve `(base_url, api_key)` for usage queries (native balance /
     /// coding-plan and the JS-script `{{apiKey}}`/`{{baseUrl}}` fallback)
     /// from the stored provider config.
@@ -452,6 +487,12 @@ pub struct ProviderMeta {
     /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
     #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
     pub codex_fast_mode: Option<bool>,
+    /// Disable OpenAI image_generation tools for this provider's chat/Responses requests.
+    #[serde(
+        rename = "disableImageGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disable_image_generation: Option<crate::settings::DisableImageGenerationMode>,
     /// Codex Responses -> Chat Completions reasoning capability metadata.
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
@@ -924,8 +965,8 @@ pub struct OpenCodeModelLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeModelConfig, CodexModelConfig, GeminiModelConfig, OpenCodeProviderConfig, Provider,
-        ProviderManager, ProviderMeta, UniversalProvider,
+        ClaudeDesktopMode, ClaudeModelConfig, CodexModelConfig, GeminiModelConfig,
+        OpenCodeProviderConfig, Provider, ProviderManager, ProviderMeta, UniversalProvider,
     };
     use serde_json::json;
 
@@ -953,6 +994,95 @@ mod tests {
         let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
 
         assert!(value.get("pricingModelSource").is_none());
+    }
+
+    #[test]
+    fn provider_meta_accepts_disable_image_generation_modes() {
+        use crate::settings::DisableImageGenerationMode;
+
+        let off: ProviderMeta = serde_json::from_value(json!({ "disableImageGeneration": false }))
+            .expect("false should deserialize");
+        let all: ProviderMeta = serde_json::from_value(json!({ "disableImageGeneration": true }))
+            .expect("true should deserialize");
+        let chat: ProviderMeta =
+            serde_json::from_value(json!({ "disableImageGeneration": "chat" }))
+                .expect("chat should deserialize");
+
+        assert_eq!(
+            off.disable_image_generation,
+            Some(DisableImageGenerationMode::Off)
+        );
+        assert_eq!(
+            all.disable_image_generation,
+            Some(DisableImageGenerationMode::All)
+        );
+        assert_eq!(
+            chat.disable_image_generation,
+            Some(DisableImageGenerationMode::Chat)
+        );
+
+        let value = serde_json::to_value(ProviderMeta {
+            disable_image_generation: Some(DisableImageGenerationMode::Chat),
+            ..ProviderMeta::default()
+        })
+        .expect("serialize ProviderMeta");
+
+        assert_eq!(value.get("disableImageGeneration"), Some(&json!("chat")));
+        assert!(value.get("disable_image_generation").is_none());
+    }
+
+    #[test]
+    fn provider_supports_image_generation_policy_only_for_routed_chat_providers() {
+        use crate::app_config::AppType;
+
+        let mut codex = Provider::with_id(
+            "codex-custom".to_string(),
+            "Codex Custom".to_string(),
+            json!({}),
+            None,
+        );
+        codex.category = Some("custom".to_string());
+        assert!(codex.supports_image_generation_policy(&AppType::Codex));
+
+        let mut official = codex.clone();
+        official.category = Some("official".to_string());
+        assert!(!official.supports_image_generation_policy(&AppType::Codex));
+
+        let mut claude = Provider::with_id(
+            "claude-openai".to_string(),
+            "Claude OpenAI".to_string(),
+            json!({}),
+            None,
+        );
+        claude.category = Some("custom".to_string());
+        claude.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..ProviderMeta::default()
+        });
+        assert!(claude.supports_image_generation_policy(&AppType::Claude));
+
+        let mut native = claude.clone();
+        native.meta = Some(ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..ProviderMeta::default()
+        });
+        assert!(!native.supports_image_generation_policy(&AppType::Claude));
+
+        let mut desktop_direct = claude.clone();
+        desktop_direct.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            ..ProviderMeta::default()
+        });
+        assert!(!desktop_direct.supports_image_generation_policy(&AppType::ClaudeDesktop));
+
+        let mut desktop_proxy = desktop_direct.clone();
+        desktop_proxy.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            ..ProviderMeta::default()
+        });
+        assert!(desktop_proxy.supports_image_generation_policy(&AppType::ClaudeDesktop));
     }
 
     #[test]

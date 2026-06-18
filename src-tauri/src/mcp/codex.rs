@@ -284,6 +284,8 @@ pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    crate::codex_config::reject_codex_live_write()?;
+
     use toml_edit::{Item, Table};
 
     // 1) 收集启用项（Codex 维度）
@@ -353,6 +355,8 @@ pub fn sync_single_server_to_codex(
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    crate::codex_config::reject_codex_live_write()?;
+
     use toml_edit::Item;
 
     // 读取现有的 config.toml
@@ -407,6 +411,8 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    crate::codex_config::reject_codex_live_write()?;
+
     let config_path = crate::codex_config::get_codex_config_path();
 
     if !config_path.exists() {
@@ -677,4 +683,107 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
     }
 
     Ok(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct IsolatedHome {
+        _temp: tempfile::TempDir,
+        old_test_home: Option<OsString>,
+        old_home: Option<OsString>,
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn isolated_home() -> IsolatedHome {
+        let temp = tempfile::tempdir().expect("create temp home");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings for isolated home");
+
+        IsolatedHome {
+            _temp: temp,
+            old_test_home,
+            old_home,
+        }
+    }
+
+    fn assert_codex_write_disabled(err: &AppError) {
+        let message = err.to_string();
+        assert!(
+            message.contains("禁用") || message.contains("disabled"),
+            "error should explain Codex live writes are disabled, got: {message}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn sync_single_server_to_codex_returns_disabled_error_and_preserves_config() {
+        let _home = isolated_home();
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create codex dir");
+        let config_path = crate::codex_config::get_codex_config_path();
+        let original_config = "model = \"gpt-5\"\n";
+        std::fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let err = sync_single_server_to_codex(
+            &MultiAppConfig::default(),
+            "echo",
+            &json!({
+                "type": "stdio",
+                "command": "echo",
+                "args": ["hello"]
+            }),
+        )
+        .expect_err("Codex MCP sync should be disabled");
+
+        assert_codex_write_disabled(&err);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config.toml"),
+            original_config
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn remove_server_from_codex_returns_disabled_error_and_preserves_config() {
+        let _home = isolated_home();
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create codex dir");
+        let config_path = crate::codex_config::get_codex_config_path();
+        let original_config = r#"model = "gpt-5"
+
+[mcp_servers.echo]
+type = "stdio"
+command = "echo"
+"#;
+        std::fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let err =
+            remove_server_from_codex("echo").expect_err("Codex MCP remove should be disabled");
+
+        assert_codex_write_disabled(&err);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config.toml"),
+            original_config
+        );
+    }
 }

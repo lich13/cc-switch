@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/runtime";
 import type { AppId } from "./types";
 
 // ===== 连通性检查类型 =====

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/runtime";
 
 export type ManagedAuthProvider = "github_copilot" | "codex_oauth";
 

@@ -7,6 +7,12 @@ const directorySchema = z
   .optional()
   .or(z.literal(""));
 
+const disableImageGenerationSchema = z.preprocess(
+  (value) =>
+    value === false || value === true || value === "chat" ? value : false,
+  z.union([z.literal(false), z.literal(true), z.literal("chat")]),
+);
+
 export const settingsSchema = z.object({
   // 设备级 UI 设置
   showInTray: z.boolean(),
@@ -17,6 +23,7 @@ export const settingsSchema = z.object({
   enableLocalProxy: z.boolean().optional(),
   preserveCodexOfficialAuthOnSwitch: z.boolean().optional(),
   unifyCodexSessionHistory: z.boolean().optional(),
+  disableImageGeneration: disableImageGenerationSchema,
   language: z.enum(["en", "zh", "zh-TW", "ja"]).optional(),
 
   // 设备级目录覆盖
@@ -69,6 +76,18 @@ export const settingsSchema = z.object({
           sourceProviderIds: z.array(z.string()).optional(),
           migratedJsonlFiles: z.number().optional(),
           migratedStateRows: z.number().optional(),
+        })
+        .optional(),
+      codexProviderTemplateV1: z
+        .object({
+          completedAt: z.string(),
+          migratedProviderIds: z.array(z.string()).optional(),
+        })
+        .optional(),
+      providerDisableImageGenerationV1: z
+        .object({
+          completedAt: z.string(),
+          migratedProviderIds: z.array(z.string()).optional(),
         })
         .optional(),
     })

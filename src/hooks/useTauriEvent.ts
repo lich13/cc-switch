@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@/lib/runtime";
 
 /**
  * 在 useEffect 中监听 Tauri 事件，自动管理异步注册和卸载清理。

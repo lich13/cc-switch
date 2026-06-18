@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/runtime";
 import type { SubscriptionQuota } from "@/types/subscription";
 
 export const subscriptionApi = {

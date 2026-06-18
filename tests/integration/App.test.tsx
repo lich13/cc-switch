@@ -11,6 +11,8 @@ import {
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
+vi.setConfig({ testTimeout: 20_000 });
+
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 

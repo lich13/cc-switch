@@ -14,6 +14,37 @@ use support::{
     create_test_state, create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex,
 };
 
+fn assert_codex_live_write_disabled(err: AppError) {
+    match err {
+        AppError::Localized { key, .. } => assert_eq!(key, "codex.live.write_disabled"),
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+fn seed_codex_live_files(auth: &str, config: &str) -> (Vec<u8>, Vec<u8>) {
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    let config_path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(&auth_path, auth.as_bytes()).expect("seed auth.json");
+    fs::write(&config_path, config.as_bytes()).expect("seed config.toml");
+    (auth.as_bytes().to_vec(), config.as_bytes().to_vec())
+}
+
+fn assert_codex_live_files_unchanged(original: &(Vec<u8>, Vec<u8>)) {
+    assert_eq!(
+        fs::read(cc_switch_lib::get_codex_auth_path()).expect("read auth.json"),
+        original.0,
+        "Codex auth.json should be preserved"
+    );
+    assert_eq!(
+        fs::read(cc_switch_lib::get_codex_config_path()).expect("read config.toml"),
+        original.1,
+        "Codex config.toml should be preserved"
+    );
+}
+
 #[test]
 fn import_default_config_claude_persists_provider() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -287,20 +318,13 @@ fn import_mcp_from_claude_invalid_json_preserves_state() {
 }
 
 #[test]
-fn set_mcp_enabled_for_codex_writes_live_config() {
+fn set_mcp_enabled_for_codex_rejects_live_config_write() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let home = ensure_test_home();
-
-    // 创建 Codex 配置目录和文件
-    let codex_dir = home.join(".codex");
-    fs::create_dir_all(&codex_dir).expect("create codex dir");
-    fs::write(
-        codex_dir.join("auth.json"),
+    let original = seed_codex_live_files(
         r#"{"OPENAI_API_KEY":"test-key"}"#,
-    )
-    .expect("create auth.json");
-    fs::write(codex_dir.join("config.toml"), "").expect("create empty config.toml");
+        "model_provider = \"openai\"\n",
+    );
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -332,27 +356,158 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
 
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    // v3.7.0: 使用 toggle_app 替代 set_enabled
-    McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
-        .expect("toggle_app should succeed");
+    let toml_path = cc_switch_lib::get_codex_config_path();
+    let original_toml = fs::read_to_string(&toml_path).expect("read original codex config");
+
+    let err = McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
+        .expect_err("Codex MCP toggle should be disabled");
+    assert_codex_live_write_disabled(err);
 
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
     let entry = servers.get("codex-server").expect("codex server exists");
     assert!(
-        entry.apps.codex,
-        "server should have Codex app enabled after toggle"
+        !entry.apps.codex,
+        "server should keep Codex app disabled after rejected toggle"
+    );
+    assert_eq!(
+        fs::read_to_string(&toml_path).expect("read codex config"),
+        original_toml,
+        "Codex config.toml should be preserved"
+    );
+    assert_codex_live_files_unchanged(&original);
+}
+
+#[test]
+fn upsert_codex_mcp_server_rejects_and_preserves_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let original = seed_codex_live_files(
+        r#"{"OPENAI_API_KEY":"test-key"}"#,
+        "model_provider = \"openai\"\n",
     );
 
-    let toml_path = cc_switch_lib::get_codex_config_path();
+    let state = create_test_state().expect("create test state");
+    let err = McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "codex-server".to_string(),
+            name: "Codex Server".to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "echo"
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: true,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect_err("Codex MCP upsert should be disabled");
+
+    assert_codex_live_write_disabled(err);
     assert!(
-        toml_path.exists(),
-        "enabling server should trigger sync to ~/.codex/config.toml"
+        state
+            .db
+            .get_all_mcp_servers()
+            .expect("get all mcp servers")
+            .is_empty(),
+        "rejected upsert should not persist server"
     );
-    let toml_text = fs::read_to_string(&toml_path).expect("read codex config");
+    assert_codex_live_files_unchanged(&original);
+}
+
+#[test]
+fn delete_codex_mcp_server_rejects_and_preserves_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let original = seed_codex_live_files(
+        r#"{"OPENAI_API_KEY":"test-key"}"#,
+        "model_provider = \"openai\"\n",
+    );
+
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_mcp_server(&McpServer {
+            id: "codex-server".to_string(),
+            name: "Codex Server".to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "echo"
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: true,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("seed mcp server");
+
+    let err = McpService::delete_server(&state, "codex-server")
+        .expect_err("Codex MCP delete should be disabled");
+    assert_codex_live_write_disabled(err);
     assert!(
-        toml_text.contains("codex-server"),
-        "codex config should include the enabled server definition"
+        state
+            .db
+            .get_all_mcp_servers()
+            .expect("get all mcp servers")
+            .contains_key("codex-server"),
+        "rejected delete should keep server in database"
     );
+    assert_codex_live_files_unchanged(&original);
+}
+
+#[allow(deprecated)]
+#[test]
+fn sync_enabled_codex_mcp_rejects_and_preserves_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let original = seed_codex_live_files(
+        r#"{"OPENAI_API_KEY":"test-key"}"#,
+        "model_provider = \"openai\"\n",
+    );
+
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_mcp_server(&McpServer {
+            id: "codex-server".to_string(),
+            name: "Codex Server".to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "echo"
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: true,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("seed mcp server");
+
+    let err = McpService::sync_enabled(&state, AppType::Codex)
+        .expect_err("Codex MCP sync should be disabled");
+    assert_codex_live_write_disabled(err);
+    assert_codex_live_files_unchanged(&original);
 }
 
 #[test]

@@ -8,6 +8,69 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisableImageGenerationMode {
+    #[default]
+    Off,
+    All,
+    Chat,
+}
+
+impl Serialize for DisableImageGenerationMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Off => serializer.serialize_bool(false),
+            Self::All => serializer.serialize_bool(true),
+            Self::Chat => serializer.serialize_str("chat"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DisableImageGenerationMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DisableImageGenerationVisitor;
+
+        impl serde::de::Visitor<'_> for DisableImageGenerationVisitor {
+            type Value = DisableImageGenerationMode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("false, true, or \"chat\"")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(if value {
+                    DisableImageGenerationMode::All
+                } else {
+                    DisableImageGenerationMode::Off
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "chat" => Ok(DisableImageGenerationMode::Chat),
+                    "all" | "true" => Ok(DisableImageGenerationMode::All),
+                    "off" | "false" => Ok(DisableImageGenerationMode::Off),
+                    _ => Err(E::custom("expected false, true, or \"chat\"")),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(DisableImageGenerationVisitor)
+    }
+}
+
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -291,6 +354,8 @@ pub struct LocalMigrations {
     /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_official_history_unify_v1: Option<CodexOfficialHistoryUnifyMigration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_disable_image_generation_v1: Option<ProviderDisableImageGenerationMigration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +394,14 @@ pub struct CodexOfficialHistoryUnifyMigration {
     /// 切换 codex_config_dir 后旧标记不会挡住新目录的迁移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_config_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDisableImageGenerationMigration {
+    pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrated_provider_ids: Vec<String>,
 }
 
 /// 应用设置结构
@@ -386,6 +459,9 @@ pub struct AppSettings {
     /// a failed migration retries at startup; cleared when the toggle turns off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unify_codex_migrate_existing: Option<bool>,
+    /// Disable OpenAI built-in image_generation tools before proxying requests upstream.
+    #[serde(default)]
+    pub disable_image_generation: DisableImageGenerationMode,
     /// User has confirmed the failover toggle first-run notice
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failover_confirmed: Option<bool>,
@@ -506,6 +582,7 @@ impl Default for AppSettings {
             preserve_codex_official_auth_on_switch: false,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
+            disable_image_generation: DisableImageGenerationMode::Off,
             failover_confirmed: None,
             first_run_notice_confirmed: None,
             common_config_confirmed: None,
@@ -840,6 +917,25 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
     })
 }
 
+pub fn is_provider_disable_image_generation_migrated() -> bool {
+    get_settings()
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| migrations.provider_disable_image_generation_v1.as_ref())
+        .is_some()
+}
+
+pub fn mark_provider_disable_image_generation_migrated(
+    migration: ProviderDisableImageGenerationMigration,
+) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        let migrations = settings
+            .local_migrations
+            .get_or_insert_with(Default::default);
+        migrations.provider_disable_image_generation_v1 = Some(migration);
+    })
+}
+
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
@@ -918,6 +1014,16 @@ pub fn unify_codex_session_history() -> bool {
             e.into_inner()
         })
         .unify_codex_session_history
+}
+
+pub fn disable_image_generation_setting() -> DisableImageGenerationMode {
+    settings_store()
+        .read()
+        .unwrap_or_else(|e| {
+            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            e.into_inner()
+        })
+        .disable_image_generation
 }
 
 // ===== 当前供应商管理函数 =====
@@ -1142,5 +1248,42 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn app_settings_defaults_disable_image_generation_to_off() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({}))
+            .expect("settings should deserialize with defaults");
+
+        assert_eq!(
+            settings.disable_image_generation,
+            DisableImageGenerationMode::Off
+        );
+    }
+
+    #[test]
+    fn app_settings_accepts_disable_image_generation_bool_and_chat_modes() {
+        let off: AppSettings =
+            serde_json::from_value(serde_json::json!({ "disableImageGeneration": false }))
+                .expect("false should deserialize");
+        let all: AppSettings =
+            serde_json::from_value(serde_json::json!({ "disableImageGeneration": true }))
+                .expect("true should deserialize");
+        let chat: AppSettings =
+            serde_json::from_value(serde_json::json!({ "disableImageGeneration": "chat" }))
+                .expect("chat should deserialize");
+
+        assert_eq!(
+            off.disable_image_generation,
+            DisableImageGenerationMode::Off
+        );
+        assert_eq!(
+            all.disable_image_generation,
+            DisableImageGenerationMode::All
+        );
+        assert_eq!(
+            chat.disable_image_generation,
+            DisableImageGenerationMode::Chat
+        );
     }
 }

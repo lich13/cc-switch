@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { isWebRuntime } from "@/lib/runtime";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
@@ -29,6 +30,8 @@ const APP_CONFIG: Array<{
   { id: "hermes", icon: "hermes", nameKey: "apps.hermes" },
 ];
 
+const WEB_APP_IDS = new Set<AppId>(["claude", "codex", "gemini"]);
+
 export function AppVisibilitySettings({
   settings,
   onChange,
@@ -44,9 +47,14 @@ export function AppVisibilitySettings({
     openclaw: true,
     hermes: true,
   };
+  const visibleAppOptions = isWebRuntime()
+    ? APP_CONFIG.filter((app) => WEB_APP_IDS.has(app.id))
+    : APP_CONFIG;
 
   // Count how many apps are currently visible
-  const visibleCount = Object.values(visibleApps).filter(Boolean).length;
+  const visibleCount = visibleAppOptions.filter(
+    (app) => visibleApps[app.id],
+  ).length;
 
   const handleToggle = (appId: AppId) => {
     const isCurrentlyVisible = visibleApps[appId];
@@ -72,7 +80,7 @@ export function AppVisibilitySettings({
         </p>
       </header>
       <div className="inline-flex gap-1 rounded-md border border-border-default bg-background p-1">
-        {APP_CONFIG.map((app) => {
+        {visibleAppOptions.map((app) => {
           const isVisible = visibleApps[app.id];
           // Disable button if this is the last visible app
           const isDisabled = isVisible && visibleCount <= 1;

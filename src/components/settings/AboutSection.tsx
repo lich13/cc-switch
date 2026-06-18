@@ -25,7 +25,6 @@ import {
 } from "@/components/ui/select";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { getVersion } from "@tauri-apps/api/app";
 import { settingsApi } from "@/lib/api";
 import type {
   ToolInstallation,
@@ -40,6 +39,7 @@ import { APP_ICON_MAP } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isWindows } from "@/lib/platform";
+import { getVersion, isWebRuntime } from "@/lib/runtime";
 import { isUpdateAvailable } from "@/lib/version";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
@@ -209,6 +209,7 @@ function mergeToolVersions(
 export function AboutSection({ isPortable }: AboutSectionProps) {
   // ... (use hooks as before) ...
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
   // 惰性初始化自模块缓存：重挂时首帧即渲染上次的值，避免 loading 闪烁；首次挂载缓存
   // 为空则回退到原始初值（null / loading）。
   const [version, setVersion] = useState<string | null>(() => appVersionCache);
@@ -323,6 +324,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const loadAllToolVersions = useCallback(
     async (options?: { force?: boolean }) => {
+      if (isWeb) {
+        setToolVersions([]);
+        setIsLoadingTools(false);
+        return;
+      }
       const force = options?.force ?? false;
       // 命中新鲜缓存：切回「关于」Tab 触发的重挂直接复用上次结果，跳过 6 个 `--version`
       // 子进程 + 6 个 latest 版本网络请求。手动「刷新」传 force 绕过缓存强制重查。
@@ -355,7 +361,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         setIsLoadingTools(false);
       }
     },
-    [wslShellByTool, refreshToolVersions],
+    [isWeb, wslShellByTool, refreshToolVersions],
   );
 
   const handleToolShellChange = async (toolName: ToolName, value: string) => {
@@ -408,7 +414,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     };
 
     void loadAppVersion();
-    void loadAllToolVersions();
+    if (!isWeb) {
+      void loadAllToolVersions();
+    }
     return () => {
       active = false;
     };
@@ -446,6 +454,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, [t, updateInfo?.availableVersion, version]);
 
   const handleCheckUpdate = useCallback(async () => {
+    if (isWeb) {
+      return;
+    }
+
     if (hasUpdate) {
       if (isPortable) {
         try {
@@ -492,7 +504,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       console.error("[AboutSection] Check update failed", error);
       toast.error(t("settings.checkUpdateFailed"));
     }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+  }, [checkUpdate, hasUpdate, isPortable, isWeb, resetDismiss, t]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -897,41 +909,43 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               <ExternalLink className="h-3.5 w-3.5" />
               {t("settings.releaseNotes")}
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleCheckUpdate}
-              disabled={isChecking || isDownloading}
-              className="h-8 gap-1.5 text-xs"
-            >
-              {isDownloading ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.updating")}
-                </>
-              ) : hasUpdate ? (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  {t("settings.updateTo", {
-                    version: updateInfo?.availableVersion ?? "",
-                  })}
-                </>
-              ) : isChecking ? (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.checking")}
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  {t("settings.checkForUpdates")}
-                </>
-              )}
-            </Button>
+            {!isWeb && (
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleCheckUpdate}
+                disabled={isChecking || isDownloading}
+                className="h-8 gap-1.5 text-xs"
+              >
+                {isDownloading ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {t("settings.updating")}
+                  </>
+                ) : hasUpdate ? (
+                  <>
+                    <Download className="h-3.5 w-3.5" />
+                    {t("settings.updateTo", {
+                      version: updateInfo?.availableVersion ?? "",
+                    })}
+                  </>
+                ) : isChecking ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    {t("settings.checking")}
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    {t("settings.checkForUpdates")}
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </div>
 
-        {hasUpdate && updateInfo && (
+        {!isWeb && hasUpdate && updateInfo && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
@@ -951,61 +965,73 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         )}
       </motion.div>
 
-      <div className="space-y-3">
-        <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="text-sm font-medium">{t("settings.localEnvCheck")}</h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 gap-1.5 text-xs"
-              onClick={() => handleDiagnoseAll()}
-              disabled={isLoadingTools || isAnyBusy || isDiagnosingAll}
-            >
-              {isDiagnosingAll ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Stethoscope className="h-3.5 w-3.5" />
-              )}
-              {isDiagnosingAll
-                ? t("settings.toolDiagnosing")
-                : t("settings.toolDiagnose")}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 gap-1.5 text-xs"
-              onClick={() => loadAllToolVersions({ force: true })}
-              disabled={isLoadingTools || isAnyBusy}
-            >
-              <RefreshCw
-                className={
-                  isLoadingTools ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"
-                }
-              />
-              {isLoadingTools ? t("common.refreshing") : t("common.refresh")}
-            </Button>
-            <Button
-              size="sm"
-              className="h-7 gap-1.5 text-xs"
-              onClick={() => handleRunToolAction(updatableToolNames, "update")}
-              disabled={
-                isLoadingTools || isAnyBusy || updatableToolNames.length === 0
-              }
-            >
-              {batchAction === "update" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <ArrowUpCircle className="h-3.5 w-3.5" />
-              )}
-              {t("settings.updateAllTools", {
-                count: updatableToolNames.length,
-              })}
-            </Button>
-          </div>
-        </div>
+      {!isWeb && (
+        <>
+          <div className="space-y-3">
+            <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
+              <h3 className="text-sm font-medium">
+                {t("settings.localEnvCheck")}
+              </h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() => handleDiagnoseAll()}
+                  disabled={isLoadingTools || isAnyBusy || isDiagnosingAll}
+                >
+                  {isDiagnosingAll ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Stethoscope className="h-3.5 w-3.5" />
+                  )}
+                  {isDiagnosingAll
+                    ? t("settings.toolDiagnosing")
+                    : t("settings.toolDiagnose")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() => loadAllToolVersions({ force: true })}
+                  disabled={isLoadingTools || isAnyBusy}
+                >
+                  <RefreshCw
+                    className={
+                      isLoadingTools
+                        ? "h-3.5 w-3.5 animate-spin"
+                        : "h-3.5 w-3.5"
+                    }
+                  />
+                  {isLoadingTools
+                    ? t("common.refreshing")
+                    : t("common.refresh")}
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() =>
+                    handleRunToolAction(updatableToolNames, "update")
+                  }
+                  disabled={
+                    isLoadingTools ||
+                    isAnyBusy ||
+                    updatableToolNames.length === 0
+                  }
+                >
+                  {batchAction === "update" ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ArrowUpCircle className="h-3.5 w-3.5" />
+                  )}
+                  {t("settings.updateAllTools", {
+                    count: updatableToolNames.length,
+                  })}
+                </Button>
+              </div>
+            </div>
 
-        <div className="grid gap-3 px-1 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-3 px-1 sm:grid-cols-2 xl:grid-cols-3">
           {TOOL_NAMES.map((toolName, index) => {
             const tool = toolVersionByName.get(toolName);
             const appConfig = APP_ICON_MAP[TOOL_APP_IDS[toolName]];
@@ -1215,50 +1241,52 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               </motion.div>
             );
           })}
-        </div>
-      </div>
-
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, delay: 0.3 }}
-        className="space-y-3"
-      >
-        <button
-          type="button"
-          onClick={() => setShowInstallCommands((v) => !v)}
-          aria-expanded={showInstallCommands}
-          className="flex w-full items-center gap-1.5 px-1 text-sm font-medium text-foreground transition-colors hover:text-primary"
-        >
-          <ChevronDown
-            className={`h-3.5 w-3.5 transition-transform ${
-              showInstallCommands ? "" : "-rotate-90"
-            }`}
-          />
-          {t("settings.manualInstallCommands")}
-        </button>
-        {showInstallCommands && (
-          <div className="rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 space-y-3 shadow-sm">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">
-                {t("settings.oneClickInstallHint")}
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleCopyInstallCommands}
-                className="h-7 gap-1.5 text-xs"
-              >
-                <Copy className="h-3.5 w-3.5" />
-                {t("common.copy")}
-              </Button>
             </div>
-            <pre className="text-xs font-mono bg-background/80 px-3 py-2.5 rounded-lg border border-border/60 overflow-x-auto">
-              {ONE_CLICK_INSTALL_COMMANDS}
-            </pre>
           </div>
-        )}
-      </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: 0.3 }}
+            className="space-y-3"
+          >
+            <button
+              type="button"
+              onClick={() => setShowInstallCommands((v) => !v)}
+              aria-expanded={showInstallCommands}
+              className="flex w-full items-center gap-1.5 px-1 text-sm font-medium text-foreground transition-colors hover:text-primary"
+            >
+              <ChevronDown
+                className={`h-3.5 w-3.5 transition-transform ${
+                  showInstallCommands ? "" : "-rotate-90"
+                }`}
+              />
+              {t("settings.manualInstallCommands")}
+            </button>
+            {showInstallCommands && (
+              <div className="rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 space-y-3 shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.oneClickInstallHint")}
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleCopyInstallCommands}
+                    className="h-7 gap-1.5 text-xs"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {t("common.copy")}
+                  </Button>
+                </div>
+                <pre className="text-xs font-mono bg-background/80 px-3 py-2.5 rounded-lg border border-border/60 overflow-x-auto">
+                  {ONE_CLICK_INSTALL_COMMANDS}
+                </pre>
+              </div>
+            )}
+          </motion.div>
+        </>
+      )}
 
       <ToolUpgradeConfirmDialog
         isOpen={pendingUpgrade !== null}

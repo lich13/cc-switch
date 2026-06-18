@@ -145,6 +145,8 @@
     "officialPartner": "公式パートナー",
     "managedByHermes": "Hermes 管理",
     "managedByHermesHint": "Hermes の providers: dict で定義されています。Hermes Web UI で編集または削除してください。",
+    "disableImageGenerationInChat": "チャットで画像生成を無効化",
+    "disableImageGenerationInChatDescription": "チャット/Responses リクエストから OpenAI image_generation ツールを削除",
     "openTerminal": "ターミナルを開く",
     "terminalOpened": "ターミナルを開きました",
     "terminalOpenFailed": "ターミナルを開けませんでした",
@@ -321,6 +323,8 @@
     "tabAuth": "認証",
     "tabAdvanced": "詳細",
     "tabProxy": "ルーティング",
+    "disableImageGenerationInChat": "チャットで画像生成を無効化",
+    "disableImageGenerationInChatDescription": "有効にすると、ローカルルーティングはチャット/Responses リクエストから OpenAI 組み込みの image_generation ツールを削除します。画像 API には影響しません。",
     "authCenter": {
       "title": "OAuth 認証センター",
       "description": "Claude Code で他のサブスクリプションをご利用いただけます。コンプライアンスリスクにご注意ください。",
@@ -387,6 +391,29 @@
         "mediaHeuristic": "ヒューリスティックなテキスト専用モデル判定",
         "mediaHeuristicDescription": "送信前に内蔵モデル名リストに基づいて画像を予測的に削除します。オフにすると「宣言済みテキスト専用」と「上流エラー時のフォールバック」のみが残り、内蔵リストがマルチモーダルモデルをテキスト専用と誤判定して画像を静かに削除するのを防ぎます"
       },
+      "userAgentRewrite": {
+        "title": "User-Agent 置換",
+        "description": "クライアントの User-Agent を正規表現で照合し、アプリごとの指定ターゲット UA に書き換えます",
+        "saveHint": "有効化スイッチはすぐに保存されます。ターゲット UA と照合ルールは保存後に反映されます。",
+        "enabled": "User-Agent 置換を有効化",
+        "enabledDescription": "オフにするとリクエストの User-Agent は変更されません",
+        "claudeTarget": "Claude ターゲット UA",
+        "codexTarget": "Codex ターゲット UA",
+        "rules": "照合正規表現",
+        "rulesPlaceholder": "^OpenAI/Python [0-9.]+$",
+        "rulesDescription": "共有の照合ルールです。有効なルールに一致した後、アプリごとのターゲット User-Agent に置換します。",
+        "ruleEnabled": "ルールを有効化",
+        "addRule": "ルールを追加",
+        "deleteRule": "ルールを削除",
+        "claudeTargetRequired": "Claude ターゲット User-Agent は必須です",
+        "codexTargetRequired": "Codex ターゲット User-Agent は必須です",
+        "tooManyRules": "User-Agent 置換ルールが多すぎます",
+        "emptyRule": "有効な User-Agent 正規表現は空にできません",
+        "invalidRegex": "有効な User-Agent 正規表現が無効です",
+        "save": "保存",
+        "saving": "保存中...",
+        "saved": "User-Agent 置換設定を保存しました"
+      },
       "optimizer": {
         "title": "Bedrock リクエストオプティマイザー",
         "description": "リクエスト送信前に Thinking と Cache の設定を自動最適化（Bedrock プロバイダーのみ有効）",
@@ -421,6 +448,10 @@
           "debug": "SSE ストリームとリクエスト/レスポンスを含む詳細情報",
           "trace": "すべてのログ、最も詳細"
         }
+      },
+      "providerData": {
+        "title": "プロバイダーのインポート/エクスポート",
+        "description": "現在のプロバイダーのみをインポート/エクスポートし、アプリ設定やデータベースバックアップは含めません"
       }
     },
     "language": "言語",
@@ -868,7 +899,32 @@
       "defaultCostMultiplierRequired": "デフォルト倍率は必須です",
       "defaultCostMultiplierInvalid": "デフォルト倍率の形式が正しくありません"
     },
-    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください"
+    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください",
+    "providerImportExport": "プロバイダーのインポート/エクスポート",
+    "providerImportExportHint": "プロバイダーデータのみを扱います。エクスポートされる JSON には API Key/Token などのシークレットが含まれるため、機密ファイルとして保管してください。",
+    "importProviders": "プロバイダーをインポート",
+    "exportProviders": "プロバイダーをエクスポート",
+    "exportProvidersSub2api": "sub2api をエクスポート",
+    "importingProviders": "プロバイダーをインポート中...",
+    "exportingProviders": "プロバイダーをエクスポート中...",
+    "providerImportSuccess": "プロバイダーをインポートしました",
+    "providerExportSuccess": "プロバイダーをエクスポートしました",
+    "providerImportFailed": "プロバイダーのインポートに失敗しました",
+    "providerExportFailed": "プロバイダーのエクスポートに失敗しました",
+    "providerImportFailedError": "プロバイダーのインポートに失敗しました: {{message}}",
+    "providerExportFailedError": "プロバイダーのエクスポートに失敗しました: {{message}}",
+    "providerTransferDone": "プロバイダー操作が完了しました",
+    "providerTransferDoneHint": "プロバイダーデータが更新されました。必要に応じてメインページを更新してください。",
+    "providerTransferFailed": "プロバイダー操作に失敗しました",
+    "sub2apiExportDialog": {
+      "title": "sub2api エクスポートアカウントを選択",
+      "description": "API キーと Base URL を解決できる、チェック済みのプロバイダーアカウントだけをエクスポートします。",
+      "selectedCount": "{{count}} 件のアカウントを選択中",
+      "selectAll": "すべて選択",
+      "clear": "クリア",
+      "export": "エクスポート",
+      "empty": "エクスポート可能なアカウントはありません"
+    }
   },
   "apps": {
     "claude": "Claude",

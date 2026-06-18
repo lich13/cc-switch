@@ -66,6 +66,10 @@ interface ProviderListProps {
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   onSetAsDefault?: (provider: Provider) => void; // OpenClaw: set as default model
+  onToggleImageGenerationPolicy?: (
+    provider: Provider,
+    enabled: boolean,
+  ) => void;
 }
 
 export function ProviderList({
@@ -88,6 +92,7 @@ export function ProviderList({
   isProxyTakeover = false,
   activeProviderId,
   onSetAsDefault,
+  onToggleImageGenerationPolicy,
 }: ProviderListProps) {
   const { t } = useTranslation();
   const { checkProvider, isChecking } = useStreamCheck(appId);
@@ -418,6 +423,7 @@ export function ProviderList({
                 onToggleFailover={(enabled) =>
                   handleToggleFailover(provider.id, enabled)
                 }
+                onToggleImageGenerationPolicy={onToggleImageGenerationPolicy}
                 activeProviderId={activeProviderId}
                 // OpenClaw: default model / Hermes: model.provider === provider.id
                 isDefaultModel={
@@ -559,6 +565,10 @@ interface SortableProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
+  onToggleImageGenerationPolicy?: (
+    provider: Provider,
+    enabled: boolean,
+  ) => void;
 }
 
 function SortableProviderCard({
@@ -589,6 +599,7 @@ function SortableProviderCard({
   activeProviderId,
   isDefaultModel,
   onSetAsDefault,
+  onToggleImageGenerationPolicy,
 }: SortableProviderCardProps) {
   const {
     setNodeRef,
@@ -638,6 +649,7 @@ function SortableProviderCard({
         failoverPriority={failoverPriority}
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
+        onToggleImageGenerationPolicy={onToggleImageGenerationPolicy}
         activeProviderId={activeProviderId}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}

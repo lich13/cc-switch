@@ -95,6 +95,10 @@ pub fn import_provider_from_deeplink(
     let app_type = AppType::from_str(&app_str)
         .map_err(|_| AppError::InvalidInput(format!("Invalid app type: {app_str}")))?;
 
+    if matches!(app_type, AppType::Codex) && merged_request.enabled.unwrap_or(false) {
+        crate::codex_config::reject_codex_live_write()?;
+    }
+
     // Build provider configuration based on app type
     let mut provider = build_provider_from_request(&app_type, &merged_request)?;
 
@@ -109,8 +113,8 @@ pub fn import_provider_from_deeplink(
 
     let provider_id = provider.id.clone();
 
-    // Use ProviderService to add the provider
-    ProviderService::add(state, app_type.clone(), provider, true)?;
+    let add_to_live = !matches!(app_type, AppType::Codex);
+    ProviderService::add(state, app_type.clone(), provider, add_to_live)?;
 
     // Add extra endpoints as custom endpoints (skip first one as it's the primary)
     for ep in all_endpoints.iter().skip(1) {

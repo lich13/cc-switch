@@ -248,6 +248,134 @@ impl Default for RectifierConfig {
     }
 }
 
+/// User-Agent 替换规则
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserAgentRewriteRule {
+    /// 是否启用该规则
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Rust regex 语法的匹配表达式
+    pub pattern: String,
+}
+
+/// User-Agent 替换配置
+///
+/// 存储在 settings 表中，key = "user_agent_rewrite_config"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserAgentRewriteConfig {
+    /// 总开关（默认开启）
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 匹配规则列表；任一启用规则命中即替换
+    #[serde(default = "default_user_agent_rewrite_rules")]
+    pub rules: Vec<UserAgentRewriteRule>,
+    /// Claude 请求命中规则后写入的目标 User-Agent。
+    #[serde(default = "default_claude_user_agent_rewrite_target")]
+    pub claude_target: String,
+    /// Codex 请求命中规则后写入的目标 User-Agent。
+    #[serde(default = "default_codex_user_agent_rewrite_target")]
+    pub codex_target: String,
+}
+
+const MAX_USER_AGENT_REWRITE_RULES: usize = 32;
+const MAX_USER_AGENT_REWRITE_PATTERN_LEN: usize = 512;
+const MAX_USER_AGENT_REWRITE_TARGET_LEN: usize = 512;
+
+fn default_user_agent_rewrite_rules() -> Vec<UserAgentRewriteRule> {
+    vec![UserAgentRewriteRule {
+        enabled: true,
+        pattern: r"^OpenAI/Python\s+\d+(?:\.\d+)*$".to_string(),
+    }]
+}
+
+pub fn default_claude_user_agent_rewrite_target() -> String {
+    "claude-cli/2.1.173 (external, cli)".to_string()
+}
+
+pub fn default_codex_user_agent_rewrite_target() -> String {
+    "codex-tui/0.139.0 (Ubuntu 24.4.0; x86_64) unknown (codex-tui; 0.139.0)".to_string()
+}
+
+impl Default for UserAgentRewriteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rules: default_user_agent_rewrite_rules(),
+            claude_target: default_claude_user_agent_rewrite_target(),
+            codex_target: default_codex_user_agent_rewrite_target(),
+        }
+    }
+}
+
+impl UserAgentRewriteConfig {
+    /// 校验所有启用规则，保存配置前调用。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.rules.len() > MAX_USER_AGENT_REWRITE_RULES {
+            return Err(format!(
+                "User-Agent 正则规则最多允许 {MAX_USER_AGENT_REWRITE_RULES} 条"
+            ));
+        }
+
+        validate_user_agent_target("Claude", &self.claude_target)?;
+        validate_user_agent_target("Codex", &self.codex_target)?;
+
+        for rule in &self.rules {
+            if rule.pattern.len() > MAX_USER_AGENT_REWRITE_PATTERN_LEN {
+                return Err(format!(
+                    "User-Agent 正则长度最多允许 {MAX_USER_AGENT_REWRITE_PATTERN_LEN} 字符"
+                ));
+            }
+
+            if rule.enabled {
+                regex::Regex::new(&rule.pattern)
+                    .map_err(|e| format!("无效的 User-Agent 正则 '{}': {e}", rule.pattern))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 运行时匹配；若历史配置中存在坏正则，则跳过该规则并记录警告，避免代理崩溃。
+    pub fn matches(&self, user_agent: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        self.rules.iter().any(|rule| {
+            if !rule.enabled {
+                return false;
+            }
+            match regex::Regex::new(&rule.pattern) {
+                Ok(re) => re.is_match(user_agent),
+                Err(e) => {
+                    log::warn!("跳过无效 User-Agent 正则 '{}': {e}", rule.pattern);
+                    false
+                }
+            }
+        })
+    }
+}
+
+fn validate_user_agent_target(label: &str, target: &str) -> Result<(), String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} User-Agent 目标值不能为空"));
+    }
+
+    if trimmed.len() > MAX_USER_AGENT_REWRITE_TARGET_LEN {
+        return Err(format!(
+            "{label} User-Agent 目标值最多允许 {MAX_USER_AGENT_REWRITE_TARGET_LEN} 字符"
+        ));
+    }
+
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} User-Agent 目标值不能包含控制字符"));
+    }
+
+    Ok(())
+}
+
 /// 请求优化器配置
 ///
 /// 存储在 settings 表中，key = "optimizer_config"
@@ -387,6 +515,114 @@ impl LogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_user_agent_rewrite_config_default_matches_openai_python_versions() {
+        let config = UserAgentRewriteConfig::default();
+
+        assert!(config.enabled);
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(
+            config.claude_target,
+            default_claude_user_agent_rewrite_target()
+        );
+        assert_eq!(
+            config.codex_target,
+            default_codex_user_agent_rewrite_target()
+        );
+        assert!(config.matches("OpenAI/Python 2.24.0"));
+        assert!(config.matches("OpenAI/Python 2.999.10"));
+        assert!(!config.matches("curl/8.7.1"));
+    }
+
+    #[test]
+    fn test_user_agent_rewrite_config_backfills_targets_from_legacy_json() {
+        let config: UserAgentRewriteConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "rules": [
+                { "enabled": true, "pattern": "^Legacy/.*$" }
+            ]
+        }))
+        .expect("legacy config should deserialize");
+
+        assert_eq!(
+            config.claude_target,
+            default_claude_user_agent_rewrite_target()
+        );
+        assert_eq!(
+            config.codex_target,
+            default_codex_user_agent_rewrite_target()
+        );
+        assert!(config.matches("Legacy/1.0"));
+    }
+
+    #[test]
+    fn test_user_agent_rewrite_config_skips_disabled_rules() {
+        let config = UserAgentRewriteConfig {
+            enabled: true,
+            rules: vec![UserAgentRewriteRule {
+                enabled: false,
+                pattern: "^curl/.*$".to_string(),
+            }],
+            ..UserAgentRewriteConfig::default()
+        };
+
+        assert!(!config.matches("curl/8.7.1"));
+    }
+
+    #[test]
+    fn test_user_agent_rewrite_config_rejects_invalid_regex() {
+        let config = UserAgentRewriteConfig {
+            enabled: true,
+            rules: vec![UserAgentRewriteRule {
+                enabled: true,
+                pattern: "(".to_string(),
+            }],
+            ..UserAgentRewriteConfig::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_user_agent_rewrite_config_rejects_empty_or_control_target() {
+        let empty_claude = UserAgentRewriteConfig {
+            claude_target: "  ".to_string(),
+            ..UserAgentRewriteConfig::default()
+        };
+        assert!(empty_claude.validate().is_err());
+
+        let bad_codex = UserAgentRewriteConfig {
+            codex_target: "codex\nbad".to_string(),
+            ..UserAgentRewriteConfig::default()
+        };
+        assert!(bad_codex.validate().is_err());
+    }
+
+    #[test]
+    fn test_user_agent_rewrite_config_rejects_excessive_rules_and_pattern_length() {
+        let too_many_rules = UserAgentRewriteConfig {
+            enabled: true,
+            rules: (0..=MAX_USER_AGENT_REWRITE_RULES)
+                .map(|index| UserAgentRewriteRule {
+                    enabled: true,
+                    pattern: format!("^Agent/{index}$"),
+                })
+                .collect(),
+            ..UserAgentRewriteConfig::default()
+        };
+        assert!(too_many_rules.validate().is_err());
+
+        let too_long_pattern = UserAgentRewriteConfig {
+            enabled: true,
+            rules: vec![UserAgentRewriteRule {
+                enabled: false,
+                pattern: "a".repeat(MAX_USER_AGENT_REWRITE_PATTERN_LEN + 1),
+            }],
+            ..UserAgentRewriteConfig::default()
+        };
+        assert!(too_long_pattern.validate().is_err());
+    }
 
     #[test]
     fn test_rectifier_config_default_enabled() {

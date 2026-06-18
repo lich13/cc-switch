@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { promptsApi, type Prompt, type AppId } from "@/lib/api";
+import { isWebRuntime } from "@/lib/runtime";
 
 export function usePromptActions(appId: AppId) {
   const { t } = useTranslation();
@@ -17,12 +18,16 @@ export function usePromptActions(appId: AppId) {
       const data = await promptsApi.getPrompts(appId);
       setPrompts(data);
 
-      // 同时加载当前文件内容
-      try {
-        const content = await promptsApi.getCurrentFileContent(appId);
-        setCurrentFileContent(content);
-      } catch (error) {
+      if (isWebRuntime()) {
         setCurrentFileContent(null);
+      } else {
+        // 同时加载当前文件内容
+        try {
+          const content = await promptsApi.getCurrentFileContent(appId);
+          setCurrentFileContent(content);
+        } catch (error) {
+          setCurrentFileContent(null);
+        }
       }
     } catch (error) {
       toast.error(t("prompts.loadFailed"));
@@ -127,6 +132,9 @@ export function usePromptActions(appId: AppId) {
   );
 
   const importFromFile = useCallback(async () => {
+    if (isWebRuntime()) {
+      throw new Error("WebUI 不支持从本机文件导入提示词");
+    }
     try {
       const id = await promptsApi.importFromFile(appId);
       await reload();

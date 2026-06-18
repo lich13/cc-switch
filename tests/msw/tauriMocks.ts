@@ -30,6 +30,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
+type RuntimeListener = (event: { payload: unknown }) => void;
+type TestRuntimeGlobal = typeof globalThis & {
+  __CC_SWITCH_TEST_EVENT_LISTENERS__?: Map<string, Set<RuntimeListener>>;
+};
 
 const ensureListenerSet = (event: string) => {
   if (!listeners.has(event)) {
@@ -41,6 +45,9 @@ const ensureListenerSet = (event: string) => {
 export const emitTauriEvent = (event: string, payload: unknown) => {
   const handlers = listeners.get(event);
   handlers?.forEach((handler) => handler({ payload }));
+  const runtimeHandlers = (globalThis as TestRuntimeGlobal)
+    .__CC_SWITCH_TEST_EVENT_LISTENERS__?.get(event);
+  runtimeHandlers?.forEach((handler) => handler({ payload }));
 };
 
 vi.mock("@tauri-apps/api/event", () => ({

@@ -490,13 +490,15 @@ mod tests {
         let db = Database::memory()?;
         let now = chrono::Utc::now().timestamp();
         let old_ts = now - 40 * 86400;
+        let date_str = chrono::Local
+            .timestamp_opt(old_ts, 0)
+            .single()
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
 
         {
             let conn = crate::database::lock_conn!(db.conn);
-            let date_str = chrono::DateTime::from_timestamp(old_ts, 0)
-                .unwrap()
-                .format("%Y-%m-%d")
-                .to_string();
             conn.execute(
                 "INSERT INTO usage_daily_rollups
                     (date, app_type, provider_id, model, request_count, success_count,
@@ -522,8 +524,8 @@ mod tests {
         let conn = crate::database::lock_conn!(db.conn);
         let (count, input): (i64, i64) = conn.query_row(
             "SELECT request_count, input_tokens FROM usage_daily_rollups
-             WHERE app_type = 'claude' AND provider_id = 'p1'",
-            [],
+             WHERE date = ?1 AND app_type = 'claude' AND provider_id = 'p1' AND model = 'claude-3'",
+            [&date_str],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(count, 13, "10 existing + 3 new");

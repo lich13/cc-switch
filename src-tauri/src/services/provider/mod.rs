@@ -463,6 +463,7 @@ base_url = "http://localhost:8080"
 
         db.update_proxy_config(ProxyConfig {
             live_takeover_active: true,
+            listen_port: 0,
             ..Default::default()
         })
         .await
@@ -496,6 +497,12 @@ base_url = "http://localhost:8080"
             .start()
             .await
             .expect("start proxy service");
+        let proxy_status = state
+            .proxy_service
+            .get_status()
+            .await
+            .expect("proxy status");
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_status.port);
 
         let updated = Provider::with_id(
             "p1".into(),
@@ -544,7 +551,7 @@ base_url = "http://localhost:8080"
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721"),
+            Some(proxy_url.as_str()),
             "proxy base URL should stay intact"
         );
         assert!(
@@ -552,6 +559,126 @@ base_url = "http://localhost:8080"
                 .and_then(|env| env.get("ANTHROPIC_MODEL"))
                 .is_none(),
             "model override should be removed in takeover live config"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn update_current_codex_provider_image_generation_policy_is_db_only() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let config_path = crate::codex_config::get_codex_config_path();
+        let original_auth = br#"{"OPENAI_API_KEY":"original"}"#;
+        let original_config = b"model = \"gpt-5\"\n";
+        fs::write(&auth_path, original_auth).expect("seed auth.json");
+        fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let mut provider = Provider::with_id(
+            "codex-custom".into(),
+            "Codex Custom".into(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("custom".into());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".into()),
+            ..Default::default()
+        });
+
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", "codex-custom")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-custom"))
+            .expect("set local current provider");
+
+        let mut updated = provider.clone();
+        updated
+            .meta
+            .get_or_insert_with(Default::default)
+            .disable_image_generation = Some(crate::settings::DisableImageGenerationMode::Chat);
+
+        ProviderService::update(&state, AppType::Codex, None, updated)
+            .expect("image-generation policy update should not write Codex live files");
+
+        let saved = db
+            .get_provider_by_id("codex-custom", "codex")
+            .expect("query provider")
+            .expect("provider exists");
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.disable_image_generation),
+            Some(crate::settings::DisableImageGenerationMode::Chat)
+        );
+        assert_eq!(fs::read(&auth_path).expect("read auth.json"), original_auth);
+        assert_eq!(
+            fs::read(&config_path).expect("read config.toml"),
+            original_config
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn update_current_codex_provider_image_generation_policy_from_empty_meta_is_db_only() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let config_path = crate::codex_config::get_codex_config_path();
+        let original_auth = br#"{"OPENAI_API_KEY":"original"}"#;
+        let original_config = b"model = \"gpt-5\"\n";
+        fs::write(&auth_path, original_auth).expect("seed auth.json");
+        fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let mut provider = Provider::with_id(
+            "codex-custom".into(),
+            "Codex Custom".into(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("custom".into());
+
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", "codex-custom")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-custom"))
+            .expect("set local current provider");
+
+        let mut updated = provider.clone();
+        updated.meta = Some(ProviderMeta {
+            disable_image_generation: Some(crate::settings::DisableImageGenerationMode::Chat),
+            ..Default::default()
+        });
+
+        ProviderService::update(&state, AppType::Codex, None, updated)
+            .expect("empty-meta policy update should not write Codex live files");
+
+        let saved = db
+            .get_provider_by_id("codex-custom", "codex")
+            .expect("query provider")
+            .expect("provider exists");
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.disable_image_generation),
+            Some(crate::settings::DisableImageGenerationMode::Chat)
+        );
+        assert_eq!(fs::read(&auth_path).expect("read auth.json"), original_auth);
+        assert_eq!(
+            fs::read(&config_path).expect("read config.toml"),
+            original_config
         );
     }
 
@@ -601,6 +728,12 @@ base_url = "http://localhost:8080"
         db.save_live_backup("claude-desktop", "{}")
             .await
             .expect("seed live backup");
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("update proxy config");
         {
             let mut config = db
                 .get_proxy_config_for_app("claude-desktop")
@@ -617,6 +750,12 @@ base_url = "http://localhost:8080"
             .start()
             .await
             .expect("start proxy service");
+        let proxy_status = state
+            .proxy_service
+            .get_status()
+            .await
+            .expect("proxy status");
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_status.port);
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -660,7 +799,7 @@ base_url = "http://localhost:8080"
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("{proxy_url}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -1158,6 +1297,12 @@ base_url = "http://localhost:8080"
 }
 
 impl ProviderService {
+    fn proxy_route_enabled(state: &AppState, app_type: &AppType) -> bool {
+        futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
+            .map(|config| config.enabled)
+            .unwrap_or(false)
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -1165,6 +1310,28 @@ impl ProviderService {
                 provider.settings_config = v;
             }
         }
+    }
+
+    fn remove_provider_image_generation_policy(value: &mut Value) -> Option<Value> {
+        let object = value.as_object_mut()?;
+        let meta = object
+            .entry("meta")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        meta.as_object_mut()?.remove("disableImageGeneration")
+    }
+
+    fn is_image_generation_policy_only_update(existing: &Provider, updated: &Provider) -> bool {
+        let Ok(mut existing_value) = serde_json::to_value(existing) else {
+            return false;
+        };
+        let Ok(mut updated_value) = serde_json::to_value(updated) else {
+            return false;
+        };
+
+        let existing_policy = Self::remove_provider_image_generation_policy(&mut existing_value);
+        let updated_policy = Self::remove_provider_image_generation_policy(&mut updated_value);
+
+        existing_value == updated_value && existing_policy != updated_policy
     }
 
     /// Check whether a provider exists in live config, tolerating parse errors
@@ -1256,12 +1423,19 @@ impl ProviderService {
         }
 
         // For other apps: Check if sync is needed (if this is current provider, or no current provider)
+        if !add_to_live && matches!(app_type, AppType::Codex) {
+            return Ok(true);
+        }
+
         let current = state.db.get_current_provider(app_type.as_str())?;
         if current.is_none() {
             // No current provider, set as current and sync
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
+            if matches!(app_type, AppType::Codex) {
+                return Ok(true);
+            }
             write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
         }
 
@@ -1285,6 +1459,15 @@ impl ProviderService {
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
+
+        if let Some(existing) = existing_provider.as_ref() {
+            if !provider_id_changed
+                && Self::is_image_generation_policy_only_update(existing, &provider)
+            {
+                state.db.save_provider(app_type.as_str(), &provider)?;
+                return Ok(true);
+            }
+        }
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -1436,15 +1619,16 @@ impl ProviderService {
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
+            let route_enabled = Self::proxy_route_enabled(state, &app_type);
             // Backup or live placeholders mean the live file is currently owned
             // by proxy takeover, including the short activation window before
             // proxy_config.enabled is committed.
-            let should_sync_via_proxy = has_live_backup || live_taken_over;
+            let should_sync_via_proxy = has_live_backup || live_taken_over || route_enabled;
 
             if should_sync_via_proxy {
                 if matches!(app_type, AppType::ClaudeDesktop) {
                     write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                } else {
+                } else if !matches!(app_type, AppType::Codex) {
                     futures::executor::block_on(
                         state
                             .proxy_service
@@ -1659,11 +1843,20 @@ impl ProviderService {
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
+        let route_enabled = Self::proxy_route_enabled(state, &app_type);
 
-        let should_hot_switch = is_app_taken_over || live_taken_over;
+        let should_hot_switch = is_app_taken_over || live_taken_over || route_enabled;
+
+        if matches!(app_type, AppType::Codex) {
+            log::info!(
+                "Codex 本地路由：切换目标供应商为 {}（不写入 live 配置）",
+                id
+            );
+            return Self::switch_codex_route_only(state, id, _provider);
+        }
 
         // Block switching to official providers when proxy takeover is active.
-        // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
+        // Using a proxy with official APIs (Anthropic/Google) may cause account bans.
         if should_hot_switch && _provider.category.as_deref() == Some("official") {
             return Err(AppError::localized(
                 "switch.official_blocked_by_proxy",
@@ -1696,6 +1889,26 @@ impl ProviderService {
 
         // Normal mode: full switch with Live config write
         Self::switch_normal(state, app_type, id, &providers)
+    }
+
+    fn switch_codex_route_only(
+        state: &AppState,
+        id: &str,
+        provider: &Provider,
+    ) -> Result<SwitchResult, AppError> {
+        Self::validate_provider_settings(&AppType::Codex, provider)?;
+
+        crate::settings::set_current_provider(&AppType::Codex, Some(id))?;
+        state.db.set_current_provider(AppType::Codex.as_str(), id)?;
+
+        futures::executor::block_on(
+            state
+                .proxy_service
+                .sync_codex_live_from_provider_while_proxy_active(provider),
+        )
+        .map_err(|e| AppError::Message(format!("更新 Codex 本地路由失败: {e}")))?;
+
+        Ok(SwitchResult::default())
     }
 
     /// Normal switch flow (non-proxy mode)
@@ -1868,21 +2081,24 @@ impl ProviderService {
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
+        let route_enabled = Self::proxy_route_enabled(state, &app_type);
 
         // See the save path above: backup/placeholders are the ownership signal
         // here, not just proxy_config.enabled.
-        if has_live_backup || live_taken_over {
+        if has_live_backup || live_taken_over || route_enabled {
             if matches!(app_type, AppType::ClaudeDesktop) {
                 write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
                 return Ok(());
             }
 
-            futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            if !matches!(app_type, AppType::Codex) {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider(app_type.as_str(), provider),
+                )
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            }
             return Ok(());
         }
 

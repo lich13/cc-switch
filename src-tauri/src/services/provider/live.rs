@@ -692,6 +692,8 @@ impl LiveSnapshot {
                 }
             }
             LiveSnapshot::Codex { auth, config } => {
+                crate::codex_config::reject_codex_live_write()?;
+
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
                 if let Some(value) = auth {
@@ -751,6 +753,8 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             ));
         }
         AppType::Codex => {
+            crate::codex_config::reject_codex_live_write()?;
+
             let obj = provider
                 .settings_config
                 .as_object()
@@ -957,14 +961,18 @@ fn sync_current_provider_for_app_respecting_takeover(
     let live_taken_over = state
         .proxy_service
         .detect_takeover_in_live_config_for_app(app_type);
+    let route_enabled =
+        futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
+            .map(|config| config.enabled)
+            .unwrap_or(false);
 
     // `enabled` is set only after takeover writes complete. During that
     // activation window, backup/live placeholders are the authoritative signal
     // that normal provider sync must not rewrite the managed live file.
-    if has_live_backup || live_taken_over {
+    if has_live_backup || live_taken_over || route_enabled {
         if matches!(app_type, AppType::ClaudeDesktop) {
             write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
-        } else {
+        } else if !matches!(app_type, AppType::Codex) {
             futures::executor::block_on(
                 state
                     .proxy_service

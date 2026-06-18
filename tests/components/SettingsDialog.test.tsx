@@ -106,6 +106,27 @@ interface ImportExportMock {
   resetStatus: ReturnType<typeof vi.fn>;
 }
 
+interface ProviderImportExportMock {
+  status: string;
+  errorMessage: string | null;
+  isImporting: boolean;
+  isExporting: boolean;
+  importProviders: ReturnType<typeof vi.fn>;
+  exportProviders: ReturnType<typeof vi.fn>;
+  exportProvidersSub2api: ReturnType<typeof vi.fn>;
+  sub2apiExportDialog: {
+    open: boolean;
+    candidates: any[];
+    selectedProviders: any[];
+    setOpen: ReturnType<typeof vi.fn>;
+    toggleProvider: ReturnType<typeof vi.fn>;
+    selectAll: ReturnType<typeof vi.fn>;
+    clearSelection: ReturnType<typeof vi.fn>;
+    confirm: ReturnType<typeof vi.fn>;
+  };
+  resetStatus: ReturnType<typeof vi.fn>;
+}
+
 const createImportExportMock = (overrides: Partial<ImportExportMock> = {}) => {
   const base: ImportExportMock = {
     selectedFile: "",
@@ -123,10 +144,40 @@ const createImportExportMock = (overrides: Partial<ImportExportMock> = {}) => {
   return { ...base, ...overrides };
 };
 
+const createProviderImportExportMock = (
+  overrides: Partial<ProviderImportExportMock> = {},
+) => {
+  const base: ProviderImportExportMock = {
+    status: "idle",
+    errorMessage: null,
+    isImporting: false,
+    isExporting: false,
+    importProviders: vi.fn(),
+    exportProviders: vi.fn(),
+    exportProvidersSub2api: vi.fn(),
+    sub2apiExportDialog: {
+      open: false,
+      candidates: [],
+      selectedProviders: [],
+      setOpen: vi.fn(),
+      toggleProvider: vi.fn(),
+      selectAll: vi.fn(),
+      clearSelection: vi.fn(),
+      confirm: vi.fn(),
+    },
+    resetStatus: vi.fn(),
+  };
+
+  return { ...base, ...overrides };
+};
+
 let settingsMock = createSettingsMock();
 let importExportMock = createImportExportMock();
+let providerImportExportMock = createProviderImportExportMock();
 const useImportExportSpy = vi.fn();
+const useProviderImportExportSpy = vi.fn();
 let lastUseImportExportOptions: Record<string, unknown> | undefined;
+let lastUseProviderImportExportOptions: Record<string, unknown> | undefined;
 
 vi.mock("@/hooks/useSettings", () => ({
   useSettings: () => settingsMock,
@@ -135,6 +186,11 @@ vi.mock("@/hooks/useSettings", () => ({
 vi.mock("@/hooks/useImportExport", () => ({
   useImportExport: (options?: Record<string, unknown>) =>
     useImportExportSpy(options),
+}));
+
+vi.mock("@/hooks/useProviderImportExport", () => ({
+  useProviderImportExport: (options?: Record<string, unknown>) =>
+    useProviderImportExportSpy(options),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -265,6 +321,7 @@ describe("SettingsPage Component", () => {
     tMock.mockImplementation((key: string) => key);
     settingsMock = createSettingsMock();
     importExportMock = createImportExportMock();
+    providerImportExportMock = createProviderImportExportMock();
     useImportExportSpy.mockReset();
     useImportExportSpy.mockImplementation(
       (options?: Record<string, unknown>) => {
@@ -272,7 +329,15 @@ describe("SettingsPage Component", () => {
         return importExportMock;
       },
     );
+    useProviderImportExportSpy.mockReset();
+    useProviderImportExportSpy.mockImplementation(
+      (options?: Record<string, unknown>) => {
+        lastUseProviderImportExportOptions = options;
+        return providerImportExportMock;
+      },
+    );
     lastUseImportExportOptions = undefined;
+    lastUseProviderImportExportOptions = undefined;
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     settingsApi = (await import("@/lib/api")).settingsApi;
@@ -314,6 +379,7 @@ describe("SettingsPage Component", () => {
     );
 
     expect(importExportMock.resetStatus).toHaveBeenCalledTimes(1);
+    expect(providerImportExportMock.resetStatus).toHaveBeenCalledTimes(1);
   });
 
   it("should render general and advanced tabs and trigger child callbacks", () => {
@@ -341,11 +407,34 @@ describe("SettingsPage Component", () => {
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.cloudSync.title"));
     expect(screen.getByText("webdav-sync-section:none")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("settings.advanced.providerData.title"));
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.importProviders",
+      }),
+    );
+    expect(providerImportExportMock.importProviders).toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.exportProviders",
+      }),
+    );
+    expect(providerImportExportMock.exportProviders).toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.exportProvidersSub2api",
+      }),
+    );
+    expect(providerImportExportMock.exportProvidersSub2api).toHaveBeenCalled();
+
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
 
     // 有文件时，点击导入按钮执行 importConfig
     fireEvent.click(
-      screen.getByRole("button", { name: /settings\.import/ }),
+      screen.getByRole("button", { name: /^settings\.import\b/ }),
     );
     expect(importExportMock.importConfig).toHaveBeenCalled();
 
@@ -368,11 +457,22 @@ describe("SettingsPage Component", () => {
       expect.objectContaining({ onImportSuccess }),
     );
     expect(lastUseImportExportOptions?.onImportSuccess).toBe(onImportSuccess);
+    expect(useProviderImportExportSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ onImportSuccess }),
+    );
+    expect(lastUseProviderImportExportOptions?.onImportSuccess).toBe(
+      onImportSuccess,
+    );
 
     if (typeof lastUseImportExportOptions?.onImportSuccess === "function") {
       await lastUseImportExportOptions.onImportSuccess();
     }
-    expect(onImportSuccess).toHaveBeenCalledTimes(1);
+    if (
+      typeof lastUseProviderImportExportOptions?.onImportSuccess === "function"
+    ) {
+      await lastUseProviderImportExportOptions.onImportSuccess();
+    }
+    expect(onImportSuccess).toHaveBeenCalledTimes(2);
   });
 
   it("should call saveSettings and close dialog when clicking save", async () => {
@@ -389,6 +489,7 @@ describe("SettingsPage Component", () => {
       expect(settingsMock.saveSettings).toHaveBeenCalledTimes(1);
       expect(importExportMock.clearSelection).toHaveBeenCalledTimes(1);
       expect(importExportMock.resetStatus).toHaveBeenCalledTimes(2);
+      expect(providerImportExportMock.resetStatus).toHaveBeenCalledTimes(2);
       expect(settingsMock.acknowledgeRestart).toHaveBeenCalledTimes(1);
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });

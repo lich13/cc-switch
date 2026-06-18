@@ -21,6 +21,9 @@ import { MCP_APP_IDS } from "@/config/appConfig";
 import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { ListItemRow } from "@/components/common/ListItemRow";
+import { isWebRuntime } from "@/lib/runtime";
+
+const WEB_MCP_APP_IDS: AppId[] = ["claude", "codex", "gemini"];
 
 interface UnifiedMcpPanelProps {
   onOpenChange: (open: boolean) => void;
@@ -36,6 +39,8 @@ const UnifiedMcpPanel = React.forwardRef<
   UnifiedMcpPanelProps
 >(({ onOpenChange: _onOpenChange }, ref) => {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
+  const mcpAppIds = isWeb ? WEB_MCP_APP_IDS : MCP_APP_IDS;
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -96,6 +101,7 @@ const UnifiedMcpPanel = React.forwardRef<
   };
 
   const handleImport = async () => {
+    if (isWeb) return;
     try {
       const count = await importMutation.mutateAsync();
       if (count === 0) {
@@ -114,7 +120,9 @@ const UnifiedMcpPanel = React.forwardRef<
 
   React.useImperativeHandle(ref, () => ({
     openAdd: handleAdd,
-    openImport: handleImport,
+    openImport: () => {
+      if (!isWeb) void handleImport();
+    },
   }));
 
   const handleDelete = (id: string) => {
@@ -144,7 +152,7 @@ const UnifiedMcpPanel = React.forwardRef<
       <AppCountBar
         totalLabel={t("mcp.serverCount", { count: serverEntries.length })}
         counts={enabledCounts}
-        appIds={MCP_APP_IDS}
+        appIds={mcpAppIds}
       />
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
@@ -175,6 +183,7 @@ const UnifiedMcpPanel = React.forwardRef<
                   onToggleApp={handleToggleApp}
                   onEdit={handleEdit}
                   onDelete={handleDelete}
+                  appIds={mcpAppIds}
                   isLast={index === serverEntries.length - 1}
                 />
               ))}
@@ -220,6 +229,7 @@ interface UnifiedMcpListItemProps {
   onToggleApp: (serverId: string, app: AppId, enabled: boolean) => void;
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
+  appIds: AppId[];
   isLast?: boolean;
 }
 
@@ -229,6 +239,7 @@ const UnifiedMcpListItem: React.FC<UnifiedMcpListItemProps> = ({
   onToggleApp,
   onEdit,
   onDelete,
+  appIds,
   isLast,
 }) => {
   const { t } = useTranslation();
@@ -286,7 +297,7 @@ const UnifiedMcpListItem: React.FC<UnifiedMcpListItemProps> = ({
       <AppToggleGroup
         apps={server.apps}
         onToggle={(app, enabled) => onToggleApp(id, app, enabled)}
-        appIds={MCP_APP_IDS}
+        appIds={appIds}
       />
 
       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">

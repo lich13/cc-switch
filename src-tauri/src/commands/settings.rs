@@ -485,6 +485,7 @@ mod tests {
                     migrated_state_rows: 7,
                     codex_config_dir: None,
                 }),
+                provider_disable_image_generation_v1: None,
             }),
             ..AppSettings::default()
         };
@@ -538,6 +539,7 @@ mod tests {
                     migrated_state_rows: 2,
                     codex_config_dir: None,
                 }),
+                provider_disable_image_generation_v1: None,
             }),
             ..AppSettings::default()
         };
@@ -604,6 +606,30 @@ pub async fn set_rectifier_config(
     state
         .db
         .set_rectifier_config(&config)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 获取 User-Agent 替换配置
+#[tauri::command]
+pub async fn get_user_agent_rewrite_config(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::proxy::types::UserAgentRewriteConfig, String> {
+    state
+        .db
+        .get_user_agent_rewrite_config()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置 User-Agent 替换配置
+#[tauri::command]
+pub async fn set_user_agent_rewrite_config(
+    state: tauri::State<'_, crate::AppState>,
+    config: crate::proxy::types::UserAgentRewriteConfig,
+) -> Result<bool, String> {
+    state
+        .db
+        .set_user_agent_rewrite_config(&config)
         .map_err(|e| e.to_string())?;
     Ok(true)
 }

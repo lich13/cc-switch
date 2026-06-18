@@ -259,6 +259,32 @@ impl Database {
         self.set_setting("rectifier_config", &json)
     }
 
+    // --- User-Agent 替换配置 ---
+
+    /// 获取 User-Agent 替换配置
+    pub fn get_user_agent_rewrite_config(
+        &self,
+    ) -> Result<crate::proxy::types::UserAgentRewriteConfig, AppError> {
+        match self.get_setting("user_agent_rewrite_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 User-Agent 替换配置失败: {e}"))),
+            None => Ok(crate::proxy::types::UserAgentRewriteConfig::default()),
+        }
+    }
+
+    /// 更新 User-Agent 替换配置
+    pub fn set_user_agent_rewrite_config(
+        &self,
+        config: &crate::proxy::types::UserAgentRewriteConfig,
+    ) -> Result<(), AppError> {
+        config
+            .validate()
+            .map_err(|e| AppError::InvalidInput(e.to_string()))?;
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化 User-Agent 替换配置失败: {e}")))?;
+        self.set_setting("user_agent_rewrite_config", &json)
+    }
+
     // --- 优化器配置 ---
 
     /// 获取优化器配置

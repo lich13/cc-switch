@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isWebRuntime, webFetch } from "@/lib/runtime";
 import type {
   Settings,
   WebDavSyncSettings,
@@ -12,6 +12,18 @@ export interface ConfigTransferResult {
   message: string;
   filePath?: string;
   backupId?: string;
+}
+
+type JsonObject = Record<string, unknown>;
+
+export interface Sub2apiProviderSelection {
+  appType: AppId;
+  providerId: string;
+}
+
+export interface Sub2apiExportCandidate extends Sub2apiProviderSelection {
+  name: string;
+  baseUrl: string;
 }
 
 export interface WebDavTestResult {
@@ -29,6 +41,78 @@ export interface CodexUnifyHistoryRestoreResult {
 export interface WebDavSyncResult {
   status: string;
 }
+
+const contentDispositionFilename = (value: string | null): string | null => {
+  if (!value) return null;
+
+  const encoded = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].replace(/^"|"$/g, ""));
+    } catch {
+      return encoded[1].replace(/^"|"$/g, "");
+    }
+  }
+
+  const plain = value.match(/filename="?([^";]+)"?/i);
+  return plain?.[1] ?? null;
+};
+
+const readWebTransferBody = async (
+  response: Response,
+): Promise<JsonObject | string | null> => {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return (await response.json().catch(() => null)) as JsonObject | null;
+  }
+  return await response.text().catch(() => "");
+};
+
+const transferErrorMessage = (
+  body: JsonObject | string | null,
+  fallback: string,
+) => {
+  if (body && typeof body === "object" && "error" in body) {
+    return String(body.error);
+  }
+  if (body && typeof body === "object" && "message" in body) {
+    return String(body.message);
+  }
+  if (typeof body === "string" && body.trim()) {
+    return body;
+  }
+  return fallback;
+};
+
+const normalizeTransferResult = (
+  body: JsonObject | string | null,
+): ConfigTransferResult => {
+  if (body && typeof body === "object") {
+    return {
+      success: body.success === undefined ? true : Boolean(body.success),
+      message: typeof body.message === "string" ? body.message : "",
+      filePath: typeof body.filePath === "string" ? body.filePath : undefined,
+      backupId: typeof body.backupId === "string" ? body.backupId : undefined,
+    };
+  }
+  return {
+    success: true,
+    message: typeof body === "string" ? body : "",
+  };
+};
+
+const triggerBrowserDownload = (blob: Blob, fileName: string) => {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = fileName;
+  link.rel = "noopener";
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+};
 
 export const settingsApi = {
   async get(): Promise<Settings> {
@@ -124,12 +208,129 @@ export const settingsApi = {
     return await invoke("open_file_dialog");
   },
 
+  async saveProvidersFileDialog(defaultName: string): Promise<string | null> {
+    return await invoke("save_providers_file_dialog", { defaultName });
+  },
+
+  async openProvidersFileDialog(): Promise<string | null> {
+    return await invoke("open_providers_file_dialog");
+  },
+
   async exportConfigToFile(filePath: string): Promise<ConfigTransferResult> {
     return await invoke("export_config_to_file", { filePath });
   },
 
   async importConfigFromFile(filePath: string): Promise<ConfigTransferResult> {
     return await invoke("import_config_from_file", { filePath });
+  },
+
+  async exportProvidersToFile(filePath: string): Promise<ConfigTransferResult> {
+    return await invoke("export_providers_to_file", { filePath });
+  },
+
+  async exportProvidersSub2apiToFile(
+    filePath: string,
+    selectedProviders: Sub2apiProviderSelection[],
+  ): Promise<ConfigTransferResult> {
+    return await invoke("export_providers_sub2api_to_file", {
+      filePath,
+      selectedProviders,
+    });
+  },
+
+  async getProvidersSub2apiExportCandidates(): Promise<
+    Sub2apiExportCandidate[]
+  > {
+    if (isWebRuntime()) {
+      const response = await webFetch(
+        "/api/admin/providers/export/sub2api/candidates",
+        {
+          method: "GET",
+        },
+      );
+      const body = await readWebTransferBody(response);
+      if (!response.ok) {
+        throw new Error(transferErrorMessage(body, `HTTP ${response.status}`));
+      }
+      return Array.isArray((body as JsonObject | null)?.candidates)
+        ? ((body as JsonObject).candidates as Sub2apiExportCandidate[])
+        : [];
+    }
+
+    const result = await invoke<{ candidates?: Sub2apiExportCandidate[] }>(
+      "list_providers_sub2api_export_candidates",
+    );
+    return Array.isArray(result?.candidates) ? result.candidates : [];
+  },
+
+  async importProvidersFromFile(
+    filePath: string,
+  ): Promise<ConfigTransferResult> {
+    return await invoke("import_providers_from_file", { filePath });
+  },
+
+  async downloadProvidersExport(
+    defaultName: string,
+  ): Promise<ConfigTransferResult> {
+    const response = await webFetch("/api/admin/providers/export", {
+      method: "GET",
+    });
+    if (!response.ok) {
+      const body = await readWebTransferBody(response);
+      throw new Error(transferErrorMessage(body, `HTTP ${response.status}`));
+    }
+
+    const fileName =
+      contentDispositionFilename(response.headers.get("content-disposition")) ||
+      defaultName;
+    const blob = await response.blob();
+    triggerBrowserDownload(blob, fileName);
+    return {
+      success: true,
+      message: "",
+      filePath: fileName,
+    };
+  },
+
+  async downloadProvidersSub2apiExport(
+    defaultName: string,
+    selectedProviders: Sub2apiProviderSelection[],
+  ): Promise<ConfigTransferResult> {
+    const response = await webFetch("/api/admin/providers/export/sub2api", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ selectedProviders }),
+    });
+    if (!response.ok) {
+      const body = await readWebTransferBody(response);
+      throw new Error(transferErrorMessage(body, `HTTP ${response.status}`));
+    }
+
+    const fileName =
+      contentDispositionFilename(response.headers.get("content-disposition")) ||
+      defaultName;
+    const blob = await response.blob();
+    triggerBrowserDownload(blob, fileName);
+    return {
+      success: true,
+      message: "",
+      filePath: fileName,
+    };
+  },
+
+  async importProvidersFromContent(
+    content: string,
+  ): Promise<ConfigTransferResult> {
+    const response = await webFetch("/api/admin/providers/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: content,
+    });
+    const body = await readWebTransferBody(response);
+    if (!response.ok) {
+      throw new Error(transferErrorMessage(body, `HTTP ${response.status}`));
+    }
+    return normalizeTransferResult(body);
   },
 
   // ─── WebDAV sync ──────────────────────────────────────────
@@ -222,6 +423,10 @@ export const settingsApi = {
     } catch {
       throw new Error("Invalid URL");
     }
+    if (isWebRuntime()) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
     await invoke("open_external", { url });
   },
 
@@ -292,6 +497,16 @@ export const settingsApi = {
     return await invoke("set_optimizer_config", { config });
   },
 
+  async getUserAgentRewriteConfig(): Promise<UserAgentRewriteConfig> {
+    return await invoke("get_user_agent_rewrite_config");
+  },
+
+  async setUserAgentRewriteConfig(
+    config: UserAgentRewriteConfig,
+  ): Promise<boolean> {
+    return await invoke("set_user_agent_rewrite_config", { config });
+  },
+
   async getLogConfig(): Promise<LogConfig> {
     return await invoke("get_log_config");
   },
@@ -334,6 +549,20 @@ export interface OptimizerConfig {
   thinkingOptimizer: boolean;
   cacheInjection: boolean;
   cacheTtl: string;
+}
+
+export interface UserAgentRewriteRule {
+  enabled?: boolean;
+  pattern: string;
+  [key: string]: unknown;
+}
+
+export interface UserAgentRewriteConfig {
+  enabled: boolean;
+  rules: UserAgentRewriteRule[];
+  claudeTarget: string;
+  codexTarget: string;
+  [key: string]: unknown;
 }
 
 export interface LogConfig {

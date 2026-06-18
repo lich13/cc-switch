@@ -24,6 +24,7 @@ import { parseSmartMcpJson } from "@/utils/formatters";
 import { useMcpValidation } from "./useMcpValidation";
 import { useUpsertMcpServer } from "@/hooks/useMcp";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
+import { isWebRuntime } from "@/lib/runtime";
 
 interface McpFormModalProps {
   editingId?: string;
@@ -45,6 +46,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
   defaultEnabledApps = ["claude", "codex", "gemini"],
 }) => {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
   const { formatTomlError, validateTomlConfig, validateJsonConfig } =
     useMcpValidation();
 
@@ -566,37 +568,41 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
                   </label>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="enable-opencode"
-                    checked={enabledApps.opencode}
-                    onCheckedChange={(checked: boolean) =>
-                      setEnabledApps({ ...enabledApps, opencode: checked })
-                    }
-                  />
-                  <label
-                    htmlFor="enable-opencode"
-                    className="text-sm text-foreground cursor-pointer select-none"
-                  >
-                    {t("mcp.unifiedPanel.apps.opencode")}
-                  </label>
-                </div>
+                {!isWeb && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id="enable-opencode"
+                        checked={enabledApps.opencode}
+                        onCheckedChange={(checked: boolean) =>
+                          setEnabledApps({ ...enabledApps, opencode: checked })
+                        }
+                      />
+                      <label
+                        htmlFor="enable-opencode"
+                        className="text-sm text-foreground cursor-pointer select-none"
+                      >
+                        {t("mcp.unifiedPanel.apps.opencode")}
+                      </label>
+                    </div>
 
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="enable-hermes"
-                    checked={enabledApps.hermes}
-                    onCheckedChange={(checked: boolean) =>
-                      setEnabledApps({ ...enabledApps, hermes: checked })
-                    }
-                  />
-                  <label
-                    htmlFor="enable-hermes"
-                    className="text-sm text-foreground cursor-pointer select-none"
-                  >
-                    {t("mcp.unifiedPanel.apps.hermes")}
-                  </label>
-                </div>
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id="enable-hermes"
+                        checked={enabledApps.hermes}
+                        onCheckedChange={(checked: boolean) =>
+                          setEnabledApps({ ...enabledApps, hermes: checked })
+                        }
+                      />
+                      <label
+                        htmlFor="enable-hermes"
+                        className="text-sm text-foreground cursor-pointer select-none"
+                      >
+                        {t("mcp.unifiedPanel.apps.hermes")}
+                      </label>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 

@@ -145,6 +145,8 @@
     "officialPartner": "官方合作夥伴",
     "managedByHermes": "Hermes 託管",
     "managedByHermesHint": "該專案定義於 Hermes 的 providers: dict，請在 Hermes Web UI 中編輯或刪除。",
+    "disableImageGenerationInChat": "聊天停用圖片生成",
+    "disableImageGenerationInChatDescription": "移除聊天/Responses 請求中的 OpenAI image_generation 工具",
     "openTerminal": "開啟終端機",
     "terminalOpened": "終端機已開啟",
     "terminalOpenFailed": "開啟終端機失敗",
@@ -321,6 +323,8 @@
     "tabAuth": "驗證",
     "tabAdvanced": "進階",
     "tabProxy": "路由",
+    "disableImageGenerationInChat": "聊天停用圖片生成",
+    "disableImageGenerationInChatDescription": "開啟後，本地路由會移除聊天/Responses 請求中的 OpenAI 內建 image_generation 工具；圖片介面不受影響。",
     "authCenter": {
       "title": "OAuth 驗證中心",
       "description": "在 Claude Code 中使用您的其他訂閱，請注意合規風險。",
@@ -387,6 +391,29 @@
         "mediaHeuristic": "啟發式純文字模型辨識",
         "mediaHeuristicDescription": "傳送前依內建模型名稱清單預測性地移除圖片。關閉後僅保留「已宣告純文字」與「上游錯誤兜底」兩條事實驅動路徑，避免內建清單將多模態模型誤判為純文字而靜默丟失圖片"
       },
+      "userAgentRewrite": {
+        "title": "User-Agent 替換",
+        "description": "依正規表示式比對客戶端 User-Agent，並依應用程式替換為指定目標 UA",
+        "saveHint": "啟用開關會立即儲存；目標 UA 和比對規則需點擊儲存後生效。",
+        "enabled": "啟用 User-Agent 替換",
+        "enabledDescription": "關閉後不會改寫任何請求的 User-Agent",
+        "claudeTarget": "Claude 目標 UA",
+        "codexTarget": "Codex 目標 UA",
+        "rules": "比對正規表示式",
+        "rulesPlaceholder": "^OpenAI/Python [0-9.]+$",
+        "rulesDescription": "共用比對規則。啟用的規則命中後，再依應用程式替換為對應目標 User-Agent。",
+        "ruleEnabled": "啟用規則",
+        "addRule": "新增規則",
+        "deleteRule": "刪除規則",
+        "claudeTargetRequired": "Claude 目標 User-Agent 不可為空",
+        "codexTargetRequired": "Codex 目標 User-Agent 不可為空",
+        "tooManyRules": "User-Agent 替換規則過多",
+        "emptyRule": "已啟用的 User-Agent 正規表示式不可為空",
+        "invalidRegex": "已啟用的 User-Agent 正規表示式無效",
+        "save": "儲存",
+        "saving": "儲存中...",
+        "saved": "User-Agent 替換設定已儲存"
+      },
       "optimizer": {
         "title": "Bedrock 請求最佳化工具",
         "description": "在請求發送前自動最佳化 Thinking 和 Cache 設定（僅 Bedrock 供應商生效）",
@@ -421,6 +448,10 @@
           "debug": "詳細資訊，包含 SSE 串流與請求/回應詳情",
           "trace": "全部日誌，最詳細"
         }
+      },
+      "providerData": {
+        "title": "供應商匯入匯出",
+        "description": "僅匯入或匯出目前所有供應商，不包含應用程式設定和資料庫備份"
       }
     },
     "language": "介面語言",
@@ -839,7 +870,32 @@
       "defaultCostMultiplierRequired": "預設倍率不能為空",
       "defaultCostMultiplierInvalid": "預設倍率格式不正確"
     },
-    "saveFailedGeneric": "儲存失敗，請重試"
+    "saveFailedGeneric": "儲存失敗，請重試",
+    "providerImportExport": "供應商匯入匯出",
+    "providerImportExportHint": "只處理目前儲存的供應商資料，和 SQL 全設定備份相互獨立。匯出的 JSON 會包含 API Key/Token 等密鑰，請作為敏感檔案保存。",
+    "importProviders": "匯入供應商",
+    "exportProviders": "匯出供應商",
+    "exportProvidersSub2api": "匯出 sub2api",
+    "importingProviders": "正在匯入供應商...",
+    "exportingProviders": "正在匯出供應商...",
+    "providerImportSuccess": "供應商匯入成功",
+    "providerExportSuccess": "供應商已匯出",
+    "providerImportFailed": "匯入供應商失敗",
+    "providerExportFailed": "匯出供應商失敗",
+    "providerImportFailedError": "匯入供應商失敗：{{message}}",
+    "providerExportFailedError": "匯出供應商失敗：{{message}}",
+    "providerTransferDone": "供應商操作完成",
+    "providerTransferDoneHint": "供應商清單已更新，請視需要重新整理主頁面。",
+    "providerTransferFailed": "供應商操作失敗",
+    "sub2apiExportDialog": {
+      "title": "選擇 sub2api 匯出帳號",
+      "description": "只會匯出已勾選且目前仍可解析 API Key 和 Base URL 的供應商帳號。",
+      "selectedCount": "已選擇 {{count}} 個帳號",
+      "selectAll": "全選",
+      "clear": "清空",
+      "export": "匯出",
+      "empty": "沒有可匯出的帳號"
+    }
   },
   "apps": {
     "claude": "Claude",

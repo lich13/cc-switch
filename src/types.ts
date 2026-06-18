@@ -213,6 +213,8 @@ export interface ProviderMeta {
   promptCacheKey?: string;
   // Codex OAuth FAST mode: injects service_tier="priority" on ChatGPT Codex requests
   codexFastMode?: boolean;
+  // Disable OpenAI built-in image_generation tools before proxying this provider's chat/Responses requests
+  disableImageGeneration?: DisableImageGenerationSetting;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
   // Custom User-Agent for local proxy routing. Only applied by the local proxy.
@@ -228,6 +230,8 @@ export type SkillSyncMethod = "auto" | "symlink" | "copy";
 
 // Skill 存储位置
 export type SkillStorageLocation = "cc_switch" | "unified";
+
+export type DisableImageGenerationSetting = false | true | "chat";
 
 // Claude API 格式类型
 // - "anthropic": 原生 Anthropic Messages API 格式，直接透传
@@ -352,6 +356,8 @@ export interface Settings {
   unifyCodexSessionHistory?: boolean;
   // User opted in (enable dialog checkbox) to migrate existing official sessions
   unifyCodexMigrateExisting?: boolean;
+  // Disable OpenAI built-in image_generation tools before proxying requests upstream
+  disableImageGeneration?: DisableImageGenerationSetting;
   // User has confirmed the failover toggle first-run notice
   failoverConfirmed?: boolean;
   // User has confirmed the first-run welcome notice
@@ -423,6 +429,14 @@ export interface Settings {
       sourceProviderIds?: string[];
       migratedJsonlFiles?: number;
       migratedStateRows?: number;
+    };
+    codexProviderTemplateV1?: {
+      completedAt: string;
+      migratedProviderIds?: string[];
+    };
+    providerDisableImageGenerationV1?: {
+      completedAt: string;
+      migratedProviderIds?: string[];
     };
   };
 }

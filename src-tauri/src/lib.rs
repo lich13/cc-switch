@@ -27,6 +27,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod rustls_provider;
 mod services;
 mod session_manager;
 mod settings;
@@ -35,6 +36,11 @@ mod store;
 mod tray;
 mod usage_events;
 mod usage_script;
+pub mod web_auth;
+pub mod web_config;
+mod web_rpc;
+pub mod web_turnstile;
+pub mod webd;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
@@ -51,6 +57,7 @@ pub use mcp::{
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use rustls_provider::ensure_rustls_crypto_provider;
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
@@ -218,6 +225,8 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ensure_rustls_crypto_provider();
+
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
     panic_hook::setup_panic_hook();
 
@@ -299,7 +308,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
+            ensure_rustls_crypto_provider();
 
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
@@ -558,6 +567,35 @@ pub fn run() {
                 }
                 Ok(_) => {}
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
+            }
+
+            if !crate::settings::is_provider_disable_image_generation_migrated() {
+                let legacy_mode = crate::settings::disable_image_generation_setting();
+                match app_state
+                    .db
+                    .migrate_provider_disable_image_generation_policy(legacy_mode)
+                {
+                    Ok(migrated_provider_ids) => {
+                        let migration =
+                            crate::settings::ProviderDisableImageGenerationMigration {
+                                completed_at: chrono::Utc::now().to_rfc3339(),
+                                migrated_provider_ids,
+                            };
+                        match crate::settings::mark_provider_disable_image_generation_migrated(
+                            migration,
+                        ) {
+                            Ok(()) => log::info!(
+                                "✓ Provider image-generation policy migration completed"
+                            ),
+                            Err(e) => log::warn!(
+                                "✗ Failed to persist provider image-generation policy migration marker: {e}"
+                            ),
+                        }
+                    }
+                    Err(e) => log::warn!(
+                        "✗ Provider image-generation policy migration failed: {e}"
+                    ),
+                }
             }
 
             {
@@ -1179,6 +1217,8 @@ pub fn run() {
             commands::restore_codex_unified_history,
             commands::get_rectifier_config,
             commands::set_rectifier_config,
+            commands::get_user_agent_rewrite_config,
+            commands::set_user_agent_rewrite_config,
             commands::get_optimizer_config,
             commands::set_optimizer_config,
             commands::get_copilot_optimizer_config,
@@ -1245,6 +1285,12 @@ pub fn run() {
             // theirs: config import/export and dialogs
             commands::export_config_to_file,
             commands::import_config_from_file,
+            commands::export_providers_to_file,
+            commands::export_providers_sub2api_to_file,
+            commands::list_providers_sub2api_export_candidates,
+            commands::import_providers_from_file,
+            commands::save_providers_file_dialog,
+            commands::open_providers_file_dialog,
             commands::webdav_test_connection,
             commands::webdav_sync_upload,
             commands::webdav_sync_download,

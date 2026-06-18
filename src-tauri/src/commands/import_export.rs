@@ -9,7 +9,7 @@ use crate::commands::sync_support::{
     post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
 };
 use crate::database::backup::BackupEntry;
-use crate::database::Database;
+use crate::database::{Database, Sub2apiProviderSelection};
 use crate::error::AppError;
 use crate::services::provider::ProviderService;
 use crate::store::AppState;
@@ -57,6 +57,119 @@ pub async fn import_config_from_file(
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?
     .map_err(|e: AppError| e.to_string())
+}
+
+/// 导出当前所有供应商为 JSON envelope
+#[tauri::command]
+pub async fn export_providers_to_file(
+    #[allow(non_snake_case)] filePath: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let target_path = PathBuf::from(&filePath);
+        db.export_providers_json(&target_path)?;
+        Ok::<_, AppError>(json!({
+            "success": true,
+            "message": "Providers exported successfully",
+            "filePath": filePath
+        }))
+    })
+    .await
+    .map_err(|e| format!("导出供应商失败: {e}"))?
+    .map_err(|e: AppError| e.to_string())
+}
+
+/// 导出当前所有供应商为 sub2api account JSON
+#[tauri::command]
+pub async fn export_providers_sub2api_to_file(
+    #[allow(non_snake_case)] filePath: String,
+    #[allow(non_snake_case)] selectedProviders: Vec<Sub2apiProviderSelection>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let target_path = PathBuf::from(&filePath);
+        db.export_providers_sub2api_json_for_selection(&target_path, &selectedProviders)?;
+        Ok::<_, AppError>(json!({
+            "success": true,
+            "message": "Providers exported as sub2api successfully",
+            "filePath": filePath
+        }))
+    })
+    .await
+    .map_err(|e| format!("导出 sub2api 供应商失败: {e}"))?
+    .map_err(|e: AppError| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_providers_sub2api_export_candidates(
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let candidates = db.list_sub2api_export_candidates()?;
+        Ok::<_, AppError>(json!({
+            "candidates": candidates
+        }))
+    })
+    .await
+    .map_err(|e| format!("读取 sub2api 可导出供应商失败: {e}"))?
+    .map_err(|e: AppError| e.to_string())
+}
+
+/// 从 JSON envelope 导入并替换当前所有供应商
+#[tauri::command]
+pub async fn import_providers_from_file(
+    #[allow(non_snake_case)] filePath: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_path = PathBuf::from(&filePath);
+        let summary = db.import_providers_json(&source_path)?;
+        Ok::<_, AppError>(json!({
+            "success": true,
+            "message": "Providers imported successfully",
+            "backupId": summary.backup_id,
+            "providerCount": summary.provider_count,
+            "providerEndpointCount": summary.provider_endpoint_count,
+            "universalProviderCount": summary.universal_provider_count
+        }))
+    })
+    .await
+    .map_err(|e| format!("导入供应商失败: {e}"))?
+    .map_err(|e: AppError| e.to_string())
+}
+
+/// 供应商 JSON 保存文件对话框
+#[tauri::command]
+pub async fn save_providers_file_dialog<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    #[allow(non_snake_case)] defaultName: String,
+) -> Result<Option<String>, String> {
+    let dialog = app.dialog();
+    let result = dialog
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(&defaultName)
+        .blocking_save_file();
+
+    Ok(result.map(|p| p.to_string()))
+}
+
+/// 供应商 JSON 打开文件对话框
+#[tauri::command]
+pub async fn open_providers_file_dialog<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let dialog = app.dialog();
+    let result = dialog
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+
+    Ok(result.map(|p| p.to_string()))
 }
 
 #[tauri::command]

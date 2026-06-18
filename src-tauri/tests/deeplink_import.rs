@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use cc_switch_lib::{import_provider_from_deeplink, parse_deeplink_url, AppState, Database};
+use cc_switch_lib::{
+    get_codex_auth_path, get_codex_config_path, import_provider_from_deeplink, parse_deeplink_url,
+    AppState, Database,
+};
 
 #[path = "support.rs"]
 mod support;
@@ -43,10 +46,12 @@ fn deeplink_import_claude_provider_persists_to_db() {
 }
 
 #[test]
-fn deeplink_import_codex_provider_builds_auth_and_config() {
+fn deeplink_import_codex_provider_persists_to_db_without_live_write() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
+    let auth_path = get_codex_auth_path();
+    let config_path = get_codex_config_path();
 
     let url = "ccswitch://v1/import?resource=provider&app=codex&name=DeepLink%20Codex&homepage=https%3A%2F%2Fopenai.example&endpoint=https%3A%2F%2Fapi.openai.example%2Fv1&apiKey=sk-test-codex-key&model=gpt-4o&icon=openai";
     let request = parse_deeplink_url(url).expect("parse deeplink url");
@@ -82,5 +87,43 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
     assert!(
         config_text.contains("model = \"gpt-4o\""),
         "config.toml content should contain model setting"
+    );
+    assert!(
+        !auth_path.exists(),
+        "Codex deeplink import should not create auth.json"
+    );
+    assert!(
+        !config_path.exists(),
+        "Codex deeplink import should not create config.toml"
+    );
+}
+
+#[test]
+fn deeplink_import_codex_provider_enabled_returns_disabled_before_db_write() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=provider&app=codex&name=DeepLink%20Codex&homepage=https%3A%2F%2Fopenai.example&endpoint=https%3A%2F%2Fapi.openai.example%2Fv1&apiKey=sk-test-codex-key&model=gpt-4o&enabled=true";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db.clone());
+
+    let err = import_provider_from_deeplink(&state, request)
+        .expect_err("enabled Codex import should be disabled");
+    assert!(
+        err.to_string().contains("禁用") || err.to_string().contains("disabled"),
+        "error should explain Codex live writes are disabled, got: {err}"
+    );
+    assert!(
+        db.get_all_providers("codex")
+            .expect("get providers")
+            .is_empty(),
+        "enabled Codex import should fail before persisting provider"
+    );
+    assert!(
+        !get_codex_auth_path().exists() && !get_codex_config_path().exists(),
+        "enabled Codex import should not create live files"
     );
 }

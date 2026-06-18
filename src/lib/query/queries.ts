@@ -72,6 +72,7 @@ export const useProvidersQuery = (
         providers = await providersApi.getAll(appId);
       } catch (error) {
         console.error("获取供应商列表失败:", error);
+        throw error;
       }
 
       try {

@@ -59,6 +59,8 @@ type HyperClient = Client<
 fn global_hyper_client() -> &'static HyperClient {
     static CLIENT: OnceLock<HyperClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
+        crate::ensure_rustls_crypto_provider();
+
         let connector = HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
@@ -549,6 +551,8 @@ async fn connect_via_proxy(
 fn global_tls_connector() -> &'static tokio_rustls::TlsConnector {
     static CONNECTOR: OnceLock<tokio_rustls::TlsConnector> = OnceLock::new();
     CONNECTOR.get_or_init(|| {
+        crate::ensure_rustls_crypto_provider();
+
         let mut root_store = rustls::RootCertStore::empty();
         // Baseline: Mozilla/webpki roots
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -735,5 +739,27 @@ impl<S: Unpin> tokio::io::AsyncWrite for WriteFilter<S> {
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_clients_install_crypto_provider_before_building() {
+        let built = std::panic::catch_unwind(|| {
+            let _ = global_tls_connector();
+            let _ = global_hyper_client();
+        });
+
+        assert!(
+            built.is_ok(),
+            "hyper_client TLS builders should install rustls CryptoProvider before use"
+        );
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "rustls CryptoProvider should be configured for raw Claude HTTPS forwarding"
+        );
     }
 }

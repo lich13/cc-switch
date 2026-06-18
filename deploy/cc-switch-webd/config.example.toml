@@ -1,0 +1,20 @@
+# Copy to /etc/cc-switch-webd/config.toml before starting the service.
+database_path = "/var/lib/cc-switch-webd/cc-switch.db"
+static_dir = "/usr/share/cc-switch-webd/webui"
+production = true
+
+[admin]
+listen = "127.0.0.1:15722"
+
+[security]
+session_ttl_seconds = 31536000
+cookie_secure = true
+turnstile_enabled = false
+turnstile_required = false
+turnstile_site_key = "0x4AAAAAADPfCPB_O-N3j6ON"
+turnstile_expected_hostname = "661313.xyz"
+turnstile_expected_action = "login"
+turnstile_verify_url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+[limits]
+admin_body_bytes = 1048576

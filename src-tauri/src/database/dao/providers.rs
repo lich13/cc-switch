@@ -1,6 +1,7 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
+use crate::settings::DisableImageGenerationMode;
 use indexmap::IndexMap;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
@@ -704,6 +705,248 @@ impl Database {
         self.save_provider(app_type_str, &provider)?;
 
         Ok(true)
+    }
+
+    pub fn migrate_provider_disable_image_generation_policy(
+        &self,
+        legacy_mode: DisableImageGenerationMode,
+    ) -> Result<Vec<String>, AppError> {
+        if matches!(legacy_mode, DisableImageGenerationMode::Off) {
+            return Ok(Vec::new());
+        }
+
+        let mut migrated = Vec::new();
+        for app_type in [
+            crate::app_config::AppType::Claude,
+            crate::app_config::AppType::ClaudeDesktop,
+            crate::app_config::AppType::Codex,
+        ] {
+            let app_type_str = app_type.as_str();
+            let providers = self.get_all_providers(app_type_str)?;
+            for mut provider in providers.into_values() {
+                if !provider.supports_image_generation_policy(&app_type) {
+                    continue;
+                }
+
+                let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+                if meta.disable_image_generation.is_some() {
+                    continue;
+                }
+
+                meta.disable_image_generation = Some(DisableImageGenerationMode::Chat);
+                self.save_provider(app_type_str, &provider)?;
+                migrated.push(format!("{app_type_str}/{}", provider.id));
+            }
+        }
+
+        Ok(migrated)
+    }
+}
+
+#[cfg(test)]
+mod provider_image_generation_policy_migration_tests {
+    use crate::app_config::AppType;
+    use crate::database::{Database, SCHEMA_VERSION};
+    use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta};
+    use crate::settings::DisableImageGenerationMode;
+    use serde_json::json;
+
+    fn save_provider(
+        db: &Database,
+        app_type: AppType,
+        id: &str,
+        category: &str,
+        meta: Option<ProviderMeta>,
+    ) {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            match app_type {
+                AppType::Codex => json!({
+                    "auth": { "OPENAI_API_KEY": "sk-test" },
+                    "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\n"
+                }),
+                _ => json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                        "ANTHROPIC_BASE_URL": "https://api.example.com"
+                    }
+                }),
+            },
+            None,
+        );
+        provider.category = Some(category.to_string());
+        provider.meta = meta;
+        db.save_provider(app_type.as_str(), &provider)
+            .expect("save provider");
+    }
+
+    fn provider_policy(
+        db: &Database,
+        app_type: AppType,
+        id: &str,
+    ) -> Option<DisableImageGenerationMode> {
+        db.get_provider_by_id(id, app_type.as_str())
+            .expect("query provider")
+            .expect("provider exists")
+            .meta
+            .and_then(|meta| meta.disable_image_generation)
+    }
+
+    #[test]
+    fn legacy_global_policy_migrates_only_supported_routed_providers_once() {
+        let db = Database::memory().expect("memory db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            Database::set_user_version(&conn, SCHEMA_VERSION).expect("set user_version");
+        }
+
+        save_provider(
+            &db,
+            AppType::Codex,
+            "codex-custom",
+            "custom",
+            Some(ProviderMeta::default()),
+        );
+        save_provider(
+            &db,
+            AppType::Codex,
+            "codex-official",
+            "official",
+            Some(ProviderMeta::default()),
+        );
+        save_provider(
+            &db,
+            AppType::Codex,
+            "codex-copilot",
+            "custom",
+            Some(ProviderMeta {
+                provider_type: Some("github_copilot".to_string()),
+                ..Default::default()
+            }),
+        );
+        save_provider(
+            &db,
+            AppType::Claude,
+            "claude-openai",
+            "custom",
+            Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                ..Default::default()
+            }),
+        );
+        save_provider(
+            &db,
+            AppType::Claude,
+            "claude-anthropic",
+            "custom",
+            Some(ProviderMeta {
+                api_format: Some("anthropic".to_string()),
+                ..Default::default()
+            }),
+        );
+        save_provider(
+            &db,
+            AppType::Claude,
+            "claude-explicit-off",
+            "custom",
+            Some(ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                disable_image_generation: Some(DisableImageGenerationMode::Off),
+                ..Default::default()
+            }),
+        );
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "desktop-direct",
+            "custom",
+            Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+                ..Default::default()
+            }),
+        );
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "desktop-proxy",
+            "custom",
+            Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+                ..Default::default()
+            }),
+        );
+
+        let migrated = db
+            .migrate_provider_disable_image_generation_policy(DisableImageGenerationMode::Chat)
+            .expect("migrate provider policies");
+
+        assert_eq!(
+            migrated,
+            vec![
+                "claude/claude-openai".to_string(),
+                "claude-desktop/desktop-proxy".to_string(),
+                "codex/codex-custom".to_string()
+            ]
+        );
+        assert_eq!(
+            provider_policy(&db, AppType::Codex, "codex-custom"),
+            Some(DisableImageGenerationMode::Chat)
+        );
+        assert_eq!(provider_policy(&db, AppType::Codex, "codex-official"), None);
+        assert_eq!(provider_policy(&db, AppType::Codex, "codex-copilot"), None);
+        assert_eq!(
+            provider_policy(&db, AppType::Claude, "claude-openai"),
+            Some(DisableImageGenerationMode::Chat)
+        );
+        assert_eq!(
+            provider_policy(&db, AppType::Claude, "claude-anthropic"),
+            None
+        );
+        assert_eq!(
+            provider_policy(&db, AppType::Claude, "claude-explicit-off"),
+            Some(DisableImageGenerationMode::Off)
+        );
+        assert_eq!(
+            provider_policy(&db, AppType::ClaudeDesktop, "desktop-direct"),
+            None
+        );
+        assert_eq!(
+            provider_policy(&db, AppType::ClaudeDesktop, "desktop-proxy"),
+            Some(DisableImageGenerationMode::Chat)
+        );
+
+        let second = db
+            .migrate_provider_disable_image_generation_policy(DisableImageGenerationMode::Chat)
+            .expect("repeat migration");
+        assert!(second.is_empty());
+
+        let conn = db.conn.lock().expect("lock db");
+        assert_eq!(
+            Database::get_user_version(&conn).expect("read user_version"),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn legacy_off_policy_does_not_modify_providers() {
+        let db = Database::memory().expect("memory db");
+        save_provider(
+            &db,
+            AppType::Codex,
+            "codex-custom",
+            "custom",
+            Some(ProviderMeta::default()),
+        );
+
+        let migrated = db
+            .migrate_provider_disable_image_generation_policy(DisableImageGenerationMode::Off)
+            .expect("migrate provider policies");
+
+        assert!(migrated.is_empty());
+        assert_eq!(provider_policy(&db, AppType::Codex, "codex-custom"), None);
     }
 }
 

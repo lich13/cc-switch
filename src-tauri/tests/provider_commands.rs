@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use cc_switch_lib::{
     get_codex_auth_path, get_codex_config_path, import_default_config_test_hook, read_json_file,
-    switch_provider_test_hook, write_codex_live_atomic, AppError, AppType, McpApps, McpServer,
-    MultiAppConfig, Provider, ProviderService,
+    switch_provider_test_hook, AppType, McpApps, McpServer, MultiAppConfig, Provider,
+    ProviderService,
 };
 
 #[path = "support.rs"]
@@ -19,6 +19,20 @@ fn settings_path(home: &Path) -> PathBuf {
     home.join(".cc-switch").join("settings.json")
 }
 
+fn seed_codex_live_files(auth: &serde_json::Value, config: &str) {
+    let auth_path = get_codex_auth_path();
+    let config_path = get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent).expect("create codex config dir");
+    }
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string(auth).expect("serialize auth"),
+    )
+    .expect("seed auth.json");
+    std::fs::write(&config_path, config).expect("seed config.toml");
+}
+
 #[test]
 fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -28,7 +42,7 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
     let auth = json!({"OPENAI_API_KEY": "fresh-key"});
     let config = r#"model = "gpt-5"
 "#;
-    write_codex_live_atomic(&auth, Some(config)).expect("seed codex live config");
+    seed_codex_live_files(&auth, config);
 
     let state = create_test_state().expect("create test state");
 
@@ -163,7 +177,7 @@ fn codex_startup_import_marks_oauth_only_default_official() {
     let config = r#"[mcp_servers.echo]
 command = "echo"
 "#;
-    write_codex_live_atomic(&auth, Some(config)).expect("seed oauth-only codex live config");
+    seed_codex_live_files(&auth, config);
 
     let state = create_test_state().expect("create test state");
     import_default_config_test_hook(&state, AppType::Codex).expect("import codex default");
@@ -195,7 +209,7 @@ fn codex_startup_import_skips_when_only_official_seed_exists() {
     let auth = json!({"OPENAI_API_KEY": "fresh-key"});
     let config = r#"model = "gpt-5"
 "#;
-    write_codex_live_atomic(&auth, Some(config)).expect("seed codex live config");
+    seed_codex_live_files(&auth, config);
 
     let state = create_test_state().expect("create test state");
     state
@@ -236,7 +250,7 @@ fn codex_startup_import_skips_when_only_official_seed_exists() {
 }
 
 #[test]
-fn switch_provider_updates_codex_live_and_state() {
+fn switch_provider_codex_updates_route_only_and_keeps_live_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     enable_codex_official_auth_preservation();
@@ -247,8 +261,7 @@ fn switch_provider_updates_codex_live_and_state() {
 type = "stdio"
 command = "echo"
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing codex live config");
+    seed_codex_live_files(&legacy_auth, legacy_config);
 
     let mut config = MultiAppConfig::default();
     {
@@ -311,29 +324,20 @@ command = "say"
     );
 
     let app_state = create_test_state_with_config(&config).expect("create test state");
+    let original_auth = std::fs::read(get_codex_auth_path()).expect("read auth.json");
+    let original_config = std::fs::read(get_codex_config_path()).expect("read config.toml");
 
     switch_provider_test_hook(&app_state, AppType::Codex, "new-provider")
-        .expect("switch provider should succeed");
-
-    let auth_value: serde_json::Value =
-        read_json_file(&get_codex_auth_path()).expect("read auth.json");
+        .expect("Codex provider switch should update local route only");
     assert_eq!(
-        auth_value
-            .get("OPENAI_API_KEY")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
-        "legacy-key",
-        "Codex provider switching should preserve the existing live auth.json"
+        std::fs::read(get_codex_auth_path()).expect("read auth.json"),
+        original_auth,
+        "auth.json should remain unchanged"
     );
-
-    let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-    assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
-    );
-    assert!(
-        config_text.contains("experimental_bearer_token"),
-        "config.toml should carry the selected provider API key as bearer token"
+    assert_eq!(
+        std::fs::read(get_codex_config_path()).expect("read config.toml"),
+        original_config,
+        "config.toml should remain unchanged"
     );
 
     let current_id = app_state
@@ -343,30 +347,13 @@ command = "say"
     assert_eq!(
         current_id.as_deref(),
         Some("new-provider"),
-        "current provider updated"
+        "current provider should update without writing live files"
     );
 
     let providers = app_state
         .db
         .get_all_providers(AppType::Codex.as_str())
         .expect("get all providers");
-
-    let new_provider = providers.get("new-provider").expect("new provider exists");
-    let new_config_text = new_provider
-        .settings_config
-        .get("config")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    // 供应商配置应该包含在 live 文件中
-    // 注意：live 文件还会包含 MCP 同步后的内容
-    assert!(
-        config_text.contains("mcp_servers.latest"),
-        "live file should contain provider's original config"
-    );
-    assert!(
-        new_config_text.contains("mcp_servers.latest"),
-        "provider snapshot should contain provider's original config"
-    );
 
     let legacy = providers
         .get("old-provider")
@@ -377,11 +364,9 @@ command = "say"
         .and_then(|v| v.get("OPENAI_API_KEY"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // 回填机制：切换前会将 live 配置回填到当前供应商
-    // 这保护了用户在 live 文件中的手动修改
     assert_eq!(
-        legacy_auth_value, "legacy-key",
-        "previous provider should be backfilled with live auth"
+        legacy_auth_value, "stale",
+        "previous provider should not be backfilled during route-only switch"
     );
 }
 
@@ -551,6 +536,19 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
         let manager = config
             .get_manager_mut(&AppType::Codex)
             .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old Codex".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "old-key"},
+                    "config": ""
+                }),
+                None,
+            ),
+        );
         manager.providers.insert(
             "invalid".to_string(),
             Provider::with_id(
@@ -567,25 +565,20 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
     let app_state = create_test_state_with_config(&config).expect("create test state");
 
     let err = switch_provider_test_hook(&app_state, AppType::Codex, "invalid")
-        .expect_err("switching should fail when auth missing");
-    match err {
-        AppError::Config(msg) => assert!(
-            msg.contains("auth"),
-            "expected auth missing error message, got {msg}"
-        ),
-        other => panic!("expected config error, got {other:?}"),
-    }
+        .expect_err("invalid Codex provider should be rejected before route update");
+    assert!(
+        err.to_string().contains("auth"),
+        "error should report invalid provider auth, got: {err:?}"
+    );
 
     let current_id = app_state
         .db
         .get_current_provider(AppType::Codex.as_str())
         .expect("get current provider");
-    // 切换失败后，由于数据库操作是先设置再验证，current 可能已被设为 "invalid"
-    // 但由于 live 配置写入失败，状态应该回滚
-    // 注意：这个行为取决于 switch_provider 的具体实现
-    assert!(
-        current_id.is_none() || current_id.as_deref() == Some("invalid"),
-        "current provider should remain empty or be the attempted id on failure, got: {current_id:?}"
+    assert_eq!(
+        current_id.as_deref(),
+        Some("old-provider"),
+        "current provider should remain unchanged after rejected invalid provider"
     );
 }
 
@@ -599,7 +592,7 @@ fn import_refuses_live_config_under_proxy_takeover() {
     let auth = json!({"OPENAI_API_KEY": "PROXY_MANAGED"});
     let config = r#"model = "gpt-5"
 "#;
-    write_codex_live_atomic(&auth, Some(config)).expect("seed taken-over codex live");
+    seed_codex_live_files(&auth, config);
 
     let state = create_test_state().expect("create test state");
 

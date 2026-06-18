@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSettingsQuery } from "@/lib/query";
-import type { Settings } from "@/types";
+import type { DisableImageGenerationSetting, Settings } from "@/types";
 
 type Language = "zh" | "zh-TW" | "en" | "ja";
 
@@ -49,6 +49,13 @@ const sanitizeDir = (value?: string | null): string | undefined => {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const normalizeDisableImageGeneration = (
+  value: unknown,
+): DisableImageGenerationSetting => {
+  if (value === true || value === "chat") return value;
+  return false;
 };
 
 export interface UseSettingsFormResult {
@@ -119,6 +126,9 @@ export function useSettingsForm(): UseSettingsFormResult {
       preserveCodexOfficialAuthOnSwitch:
         data.preserveCodexOfficialAuthOnSwitch ?? false,
       unifyCodexSessionHistory: data.unifyCodexSessionHistory ?? false,
+      disableImageGeneration: normalizeDisableImageGeneration(
+        data.disableImageGeneration,
+      ),
       claudeConfigDir: sanitizeDir(data.claudeConfigDir),
       codexConfigDir: sanitizeDir(data.codexConfigDir),
       geminiConfigDir: sanitizeDir(data.geminiConfigDir),
@@ -145,6 +155,7 @@ export function useSettingsForm(): UseSettingsFormResult {
             skipClaudeOnboarding: false,
             preserveCodexOfficialAuthOnSwitch: false,
             unifyCodexSessionHistory: false,
+            disableImageGeneration: false,
             language: readPersistedLanguage(),
           } as SettingsFormState);
 
@@ -152,6 +163,17 @@ export function useSettingsForm(): UseSettingsFormResult {
           ...base,
           ...updates,
         };
+
+        if (
+          Object.prototype.hasOwnProperty.call(
+            updates,
+            "disableImageGeneration",
+          )
+        ) {
+          next.disableImageGeneration = normalizeDisableImageGeneration(
+            updates.disableImageGeneration,
+          );
+        }
 
         if (updates.language) {
           const normalized = normalizeLanguage(updates.language);
@@ -185,6 +207,9 @@ export function useSettingsForm(): UseSettingsFormResult {
         preserveCodexOfficialAuthOnSwitch:
           serverData.preserveCodexOfficialAuthOnSwitch ?? false,
         unifyCodexSessionHistory: serverData.unifyCodexSessionHistory ?? false,
+        disableImageGeneration: normalizeDisableImageGeneration(
+          serverData.disableImageGeneration,
+        ),
         claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
         codexConfigDir: sanitizeDir(serverData.codexConfigDir),
         geminiConfigDir: sanitizeDir(serverData.geminiConfigDir),

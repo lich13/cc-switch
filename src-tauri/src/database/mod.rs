@@ -26,6 +26,7 @@
 pub(crate) mod backup;
 mod dao;
 mod migration;
+mod provider_export;
 mod schema;
 
 #[cfg(test)]
@@ -38,11 +39,13 @@ pub(crate) use dao::proxy::{
     PRICING_SOURCE_RESPONSE,
 };
 pub use dao::FailoverQueueItem;
+pub use provider_export::Sub2apiProviderSelection;
 
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -75,6 +78,7 @@ pub(crate) use lock_conn;
 /// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
+    pub(crate) db_path: Option<PathBuf>,
 }
 
 fn register_db_change_hook(conn: &Connection) {
@@ -95,6 +99,14 @@ impl Database {
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
         let db_path = get_app_config_dir().join("cc-switch.db");
+        Self::init_at(db_path)
+    }
+
+    /// 初始化指定路径的数据库连接并创建表
+    ///
+    /// 无头服务使用此入口，避免云机进程误写桌面用户目录。
+    pub fn init_at(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let db_path = path.as_ref().to_path_buf();
         let db_exists = db_path.exists();
 
         // 确保父目录存在
@@ -117,6 +129,7 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            db_path: Some(db_path),
         };
         db.create_tables()?;
 
@@ -172,6 +185,7 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            db_path: None,
         };
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;

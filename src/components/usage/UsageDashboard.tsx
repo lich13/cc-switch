@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import { useQueryClient } from "@tanstack/react-query";
 import { usageKeys, useModelStats, useProviderStats } from "@/lib/query/usage";
+import { isWebRuntime } from "@/lib/runtime";
 import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
 import {
   Accordion,
@@ -45,6 +46,10 @@ import { UsageDateRangePicker } from "./UsageDateRangePicker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const APP_FILTER_OPTIONS: AppTypeFilter[] = ["all", ...KNOWN_APP_TYPES];
+const WEB_APP_FILTER_OPTIONS: AppTypeFilter[] = [
+  "all",
+  ...KNOWN_APP_TYPES.filter((type) => type !== "opencode"),
+];
 
 // 0 表示关闭自动刷新（refetchInterval=false）
 const REFRESH_INTERVAL_OPTIONS_MS = [0, 5000, 10000, 30000, 60000] as const;
@@ -74,6 +79,8 @@ export function UsageDashboard() {
   );
   const [model, setModel] = useState<string | undefined>(undefined);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(30000);
+  const isWeb = isWebRuntime();
+  const appFilterOptions = isWeb ? WEB_APP_FILTER_OPTIONS : APP_FILTER_OPTIONS;
 
   // 切应用时清掉下游筛选，避免留下一个在新范围内查无数据的"幽灵"组合；
   // 切 Provider 同理清掉模型（模型选项随 Provider 级联）。
@@ -169,7 +176,7 @@ export function UsageDashboard() {
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center p-1 bg-muted/30 rounded-lg border border-border/50">
-            {APP_FILTER_OPTIONS.map((type) => {
+            {appFilterOptions.map((type) => {
               const label = t(`usage.appFilter.${type}`);
               return (
                 <button
@@ -292,14 +299,16 @@ export function UsageDashboard() {
         refreshIntervalMs={refreshIntervalMs}
       />
 
-      <UsageTrendChart
-        range={range}
-        rangeLabel={rangeLabel}
-        appType={appType}
-        providerName={providerName}
-        model={model}
-        refreshIntervalMs={refreshIntervalMs}
-      />
+      {!isWeb && (
+        <UsageTrendChart
+          range={range}
+          rangeLabel={rangeLabel}
+          appType={appType}
+          providerName={providerName}
+          model={model}
+          refreshIntervalMs={refreshIntervalMs}
+        />
+      )}
 
       <div className="space-y-4">
         <Tabs defaultValue="logs" className="w-full">

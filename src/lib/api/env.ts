@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isWebRuntime } from "@/lib/runtime";
 import type { EnvConflict, BackupInfo } from "@/types/env";
 
 /**
@@ -13,6 +13,9 @@ import type { EnvConflict, BackupInfo } from "@/types/env";
 export async function checkEnvConflicts(
   appType: string,
 ): Promise<EnvConflict[]> {
+  if (isWebRuntime()) {
+    return [];
+  }
   return invoke<EnvConflict[]>("check_env_conflicts", { app: appType });
 }
 

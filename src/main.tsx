@@ -7,12 +7,16 @@ import "./index.css";
 import i18n from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
+import { WebAuthGate } from "@/components/web/WebAuthGate";
 import { queryClient } from "@/lib/query";
 import { Toaster } from "@/components/ui/sonner";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
-import { message } from "@tauri-apps/plugin-dialog";
-import { exit } from "@tauri-apps/plugin-process";
+import {
+  exitApp,
+  invoke,
+  isDesktopRuntime,
+  listen,
+  showMessage,
+} from "@/lib/runtime";
 
 // 根据平台添加 body class，便于平台特定样式
 try {
@@ -42,7 +46,7 @@ async function handleConfigLoadError(
   const path = payload?.path ?? "~/.cc-switch/config.json";
   const detail = payload?.error ?? "Unknown error";
 
-  await message(
+  await showMessage(
     i18n.t("errors.configLoadFailedMessage", {
       path,
       detail,
@@ -57,7 +61,7 @@ async function handleConfigLoadError(
     },
   );
 
-  await exit(1);
+  await exitApp(1);
 }
 
 // 监听后端的配置加载错误事件：仅提醒用户并强制退出，不修改任何配置文件
@@ -71,19 +75,21 @@ try {
 }
 
 async function bootstrap() {
-  // 启动早期主动查询后端初始化错误，避免事件竞态
-  try {
-    const initError = (await invoke(
-      "get_init_error",
-    )) as ConfigLoadErrorPayload | null;
-    if (initError && (initError.path || initError.error)) {
-      await handleConfigLoadError(initError);
-      // 注意：不会执行到这里，因为 exit(1) 会终止进程
-      return;
+  if (isDesktopRuntime()) {
+    // 启动早期主动查询后端初始化错误，避免事件竞态
+    try {
+      const initError = (await invoke(
+        "get_init_error",
+      )) as ConfigLoadErrorPayload | null;
+      if (initError && (initError.path || initError.error)) {
+        await handleConfigLoadError(initError);
+        // 注意：不会执行到这里，因为 exit(1) 会终止进程
+        return;
+      }
+    } catch (e) {
+      // 忽略拉取错误，继续渲染
+      console.error("拉取初始化错误失败", e);
     }
-  } catch (e) {
-    // 忽略拉取错误，继续渲染
-    console.error("拉取初始化错误失败", e);
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -91,7 +97,9 @@ async function bootstrap() {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
           <UpdateProvider>
-            <App />
+            <WebAuthGate>
+              <App />
+            </WebAuthGate>
             <Toaster />
           </UpdateProvider>
         </ThemeProvider>

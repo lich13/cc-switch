@@ -150,14 +150,47 @@ jobs:
           fi
           echo "✅ Tauri signing key prepared"
 
-      - name: Import Apple signing certificate
+      - name: Detect Apple signing credentials
+        id: apple-signing
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "$APPLE_CERTIFICATE" ] \
+            && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] \
+            && [ -n "$KEYCHAIN_PASSWORD" ] \
+            && [ -n "$APPLE_ID" ] \
+            && [ -n "$APPLE_PASSWORD" ] \
+            && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "APPLE_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Apple signing/notarization enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "APPLE_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "Apple signing/notarization secrets are incomplete; building ad-hoc signed macOS assets"
+          fi
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
           # Decode .p12 certificate from base64
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          printf '%s' "${{ secrets.APPLE_CERTIFICATE }}" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
+          printf '%s' "$APPLE_CERTIFICATE" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
 
           # Save original default keychain for cleanup
           ORIGINAL_DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"' | xargs)
@@ -165,18 +198,18 @@ jobs:
 
           # Create temporary keychain
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Import certificate
           security import "$CERT_PATH" \
             -k "$KEYCHAIN_PATH" \
-            -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Dynamically resolve signing identity (must be "Developer ID Application")
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
@@ -197,6 +230,7 @@ jobs:
         shell: bash
         timeout-minutes: 60
         env:
+          APPLE_SIGNING_ENABLED: ${{ steps.apple-signing.outputs.enabled }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -204,6 +238,10 @@ jobs:
         run: |
           set -euo pipefail
           max_attempts=3
+          if [ "${APPLE_SIGNING_ENABLED:-false}" != "true" ]; then
+            export APPLE_SIGNING_IDENTITY="-"
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
             if pnpm tauri build --target universal-apple-darwin; then
@@ -223,15 +261,34 @@ jobs:
 
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
-        run: pnpm tauri build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm tauri build
+          if (-not (Test-Path 'src-tauri/target/release/cc-switch.exe')) {
+            throw 'Desktop build did not produce src-tauri/target/release/cc-switch.exe'
+          }
+          if (Test-Path 'src-tauri/target/release/cc-switch-webd.exe') {
+            throw 'Desktop build unexpectedly produced cc-switch-webd.exe'
+          }
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
-        run: pnpm tauri build --bundles appimage,deb,rpm
+        shell: bash
+        run: |
+          set -euxo pipefail
+          pnpm tauri build --bundles appimage,deb,rpm
+          test -x src-tauri/target/release/cc-switch
+          if [ -x src-tauri/target/release/cc-switch-webd ]; then
+            echo "Desktop build unexpectedly produced cc-switch-webd" >&2
+            exit 1
+          fi
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_SIGNING_ENABLED: ${{ steps.apple-signing.outputs.enabled }}
         run: |
           set -euxo pipefail
           mkdir -p release-assets
@@ -258,10 +315,27 @@ jobs:
             echo "❌ No .app found" >&2
             exit 1
           fi
+          MAIN_BINARY="$APP_PATH/Contents/MacOS/cc-switch"
+          if [ ! -x "$MAIN_BINARY" ]; then
+            echo "❌ macOS app main binary is not cc-switch: $MAIN_BINARY" >&2
+            find "$APP_PATH/Contents/MacOS" -maxdepth 1 -type f -print >&2 || true
+            exit 1
+          fi
+          if /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" | grep -Fx 'cc-switch'; then
+            echo "✅ macOS CFBundleExecutable is cc-switch"
+          else
+            echo "❌ macOS CFBundleExecutable is not cc-switch" >&2
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" >&2 || true
+            exit 1
+          fi
 
-          # Staple notarization ticket to .app (Tauri already notarized it)
-          xcrun stapler staple "$APP_PATH"
-          echo "✅ .app stapled"
+          if [ "${APPLE_SIGNING_ENABLED:-false}" = "true" ]; then
+            # Staple notarization ticket to .app (Tauri already notarized it)
+            xcrun stapler staple "$APP_PATH"
+            echo "✅ .app stapled"
+          else
+            echo "Apple signing not configured; skipping app stapling"
+          fi
 
           # 1) Collect .tar.gz (updater artifact)
           NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
@@ -274,38 +348,39 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
           echo "macOS zip ready: $NEW_ZIP"
 
-          # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
-          fi
-
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
+          # 3) Create DMG
           NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
 
-          create-dmg \
-            --volname "CC Switch" \
-            --background "src-tauri/icons/dmg-background.png" \
-            --window-size 660 400 \
-            --window-pos 200 120 \
-            --icon-size 80 \
-            --icon "CC Switch.app" 180 220 \
-            --hide-extension "CC Switch.app" \
-            --app-drop-link 480 220 \
-            --codesign "$APPLE_SIGNING_IDENTITY" \
-            --no-internet-enable \
-            "release-assets/$NEW_DMG" \
-            "$DMG_STAGE_DIR"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
+          CREATE_DMG_ARGS=(
+            --volname "CC Switch"
+            --background "src-tauri/icons/dmg-background.png"
+            --window-size 660 400
+            --window-pos 200 120
+            --icon-size 80
+            --icon "CC Switch.app" 180 220
+            --hide-extension "CC Switch.app"
+            --app-drop-link 480 220
+          )
+          if [ "${APPLE_SIGNING_ENABLED:-false}" = "true" ]; then
+            if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+              echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
+              exit 1
+            fi
+            CREATE_DMG_ARGS+=(--codesign "$APPLE_SIGNING_IDENTITY")
+          fi
+          CREATE_DMG_ARGS+=(--no-internet-enable "release-assets/$NEW_DMG" "$DMG_STAGE_DIR")
+          create-dmg "${CREATE_DMG_ARGS[@]}"
 
           rm -rf "$DMG_STAGE_DIR"
-          echo "✅ Styled DMG created: $NEW_DMG"
+          echo "✅ DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         timeout-minutes: 30
         env:
@@ -349,6 +424,8 @@ jobs:
       - name: Verify macOS code signing and notarization
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_SIGNING_ENABLED: ${{ steps.apple-signing.outputs.enabled }}
         run: |
           set -euo pipefail
 
@@ -369,23 +446,50 @@ jobs:
             exit 1
           fi
           echo "=== Verifying .app: $APP_PATH ==="
-          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          echo "✅ codesign verification passed"
-          spctl -a -t exec -vv "$APP_PATH"
-          echo "✅ spctl assessment passed"
-          xcrun stapler validate "$APP_PATH"
-          echo "✅ .app stapler validation passed"
+          test -x "$APP_PATH/Contents/MacOS/cc-switch"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" | grep -Fx 'cc-switch'
+          if [ "${APPLE_SIGNING_ENABLED:-false}" = "true" ]; then
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+            echo "✅ codesign verification passed"
+            spctl -a -t exec -vv "$APP_PATH"
+            echo "✅ spctl assessment passed"
+            xcrun stapler validate "$APP_PATH"
+            echo "✅ .app stapler validation passed"
+          else
+            test -d "$APP_PATH"
+            echo "Apple signing not configured; verified .app bundle exists"
+          fi
 
           # Verify .dmg (from release-assets/, created by create-dmg + notarized)
           DMG_PATH=$(find release-assets -maxdepth 1 -name "*.dmg" -type f | head -1 || true)
           if [ -n "$DMG_PATH" ]; then
             echo "=== Verifying .dmg: $DMG_PATH ==="
-            codesign --verify --verbose=2 "$DMG_PATH"
-            echo "✅ .dmg codesign verification passed"
-            spctl -a -t open --context context:primary-signature -vv "$DMG_PATH"
-            echo "✅ .dmg spctl assessment passed"
-            xcrun stapler validate "$DMG_PATH"
-            echo "✅ .dmg stapler validation passed"
+            hdiutil verify "$DMG_PATH"
+            echo "✅ .dmg hdiutil verification passed"
+            DMG_MOUNT_DIR="$(mktemp -d)"
+            cleanup_dmg_mount() {
+              hdiutil detach "$DMG_MOUNT_DIR" >/dev/null 2>&1 || true
+              rm -rf "$DMG_MOUNT_DIR"
+            }
+            trap cleanup_dmg_mount EXIT
+            hdiutil attach -nobrowse -readonly -mountpoint "$DMG_MOUNT_DIR" "$DMG_PATH"
+            test -d "$DMG_MOUNT_DIR/CC Switch.app"
+            test -L "$DMG_MOUNT_DIR/Applications"
+            if [ "$(readlink "$DMG_MOUNT_DIR/Applications")" != "/Applications" ]; then
+              echo "❌ DMG Applications link does not point to /Applications" >&2
+              exit 1
+            fi
+            cleanup_dmg_mount
+            trap - EXIT
+            echo "✅ .dmg contains CC Switch.app and /Applications shortcut"
+            if [ "${APPLE_SIGNING_ENABLED:-false}" = "true" ]; then
+              codesign --verify --verbose=2 "$DMG_PATH"
+              echo "✅ .dmg codesign verification passed"
+              spctl -a -t open --context context:primary-signature -vv "$DMG_PATH"
+              echo "✅ .dmg spctl assessment passed"
+              xcrun stapler validate "$DMG_PATH"
+              echo "✅ .dmg stapler validation passed"
+            fi
           else
             echo "❌ No .dmg found for verification — release would ship without verified DMG" >&2
             exit 1
@@ -425,6 +529,9 @@ jobs:
           )
           $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($null -ne $exePath) {
+            if ((Split-Path $exePath -Leaf) -ne 'cc-switch.exe') {
+              throw "Portable binary is not cc-switch.exe: $exePath"
+            }
             $portableDir = 'release-assets/CC-Switch-Portable'
             New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
             Copy-Item $exePath $portableDir
@@ -450,6 +557,13 @@ jobs:
           mkdir -p release-assets
           VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
           ARCH="${{ matrix.arch || 'x86_64' }}"
+          rm -f src-tauri/webd/Cargo.lock
+          trap 'rm -f src-tauri/webd/Cargo.lock' EXIT
+          cp src-tauri/Cargo.lock src-tauri/webd/Cargo.lock
+          cargo build --manifest-path src-tauri/webd/Cargo.toml --release --target-dir src-tauri/target
+          rm -f src-tauri/webd/Cargo.lock
+          test -x "src-tauri/target/release/cc-switch"
+          test -x "src-tauri/target/release/cc-switch-webd"
           # Updater artifact: AppImage（含对应 .sig）
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
           if [ -n "$APPIMAGE" ]; then
@@ -476,6 +590,34 @@ jobs:
           else
             echo "No .rpm found (optional)"
           fi
+          # Headless cloud WebUI daemon asset.
+          WEBD_STAGE="$RUNNER_TEMP/cc-switch-webd-linux-${ARCH}"
+          rm -rf "$WEBD_STAGE"
+          mkdir -p "$WEBD_STAGE/bin" "$WEBD_STAGE/webui" "$WEBD_STAGE/deploy"
+          cp "src-tauri/target/release/cc-switch-webd" "$WEBD_STAGE/bin/cc-switch-webd"
+          cp -a dist/. "$WEBD_STAGE/webui/"
+          cp -a deploy/cc-switch-webd/. "$WEBD_STAGE/deploy/"
+          tar -C "$RUNNER_TEMP" -czf "release-assets/cc-switch-webd-linux-${ARCH}.tar.gz" "cc-switch-webd-linux-${ARCH}"
+          (cd release-assets && sha256sum "cc-switch-webd-linux-${ARCH}.tar.gz" > "cc-switch-webd-linux-${ARCH}.tar.gz.sha256")
+          (cd release-assets && sha256sum -c "cc-switch-webd-linux-${ARCH}.tar.gz.sha256")
+          tar -tzf "release-assets/cc-switch-webd-linux-${ARCH}.tar.gz" >/tmp/cc-switch-webd-archive-list.txt
+          grep -Fx "cc-switch-webd-linux-${ARCH}/bin/cc-switch-webd" /tmp/cc-switch-webd-archive-list.txt
+          grep -Fx "cc-switch-webd-linux-${ARCH}/webui/index.html" /tmp/cc-switch-webd-archive-list.txt
+          grep -Fx "cc-switch-webd-linux-${ARCH}/deploy/install.sh" /tmp/cc-switch-webd-archive-list.txt
+          CHECK_DIR="$RUNNER_TEMP/cc-switch-webd-check-${ARCH}"
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
+          tar -xzf "release-assets/cc-switch-webd-linux-${ARCH}.tar.gz" -C "$CHECK_DIR"
+          test -x "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/bin/cc-switch-webd"
+          test -f "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/webui/index.html"
+          test -x "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/deploy/install.sh"
+          "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/deploy/install.sh" --check
+          if ldd "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/bin/cc-switch-webd" | grep 'not found'; then
+            echo "cc-switch-webd has missing runtime libraries" >&2
+            exit 1
+          fi
+          "$CHECK_DIR/cc-switch-webd-linux-${ARCH}/bin/cc-switch-webd" --version
+          echo "cc-switch-webd archive copied: cc-switch-webd-linux-${ARCH}.tar.gz"
 
       - name: List prepared assets
         shell: bash
@@ -539,7 +681,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: CC Switch ${{ github.ref_name }}
-          prerelease: true
+          prerelease: false
           body: |
             ## CC Switch ${{ github.ref_name }}
 
@@ -553,11 +695,13 @@ jobs:
             - **Windows**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
             - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
+            - **Linux 云机 WebUI (x86_64)**: `cc-switch-webd-linux-x86_64.tar.gz`（含 `systemd` / `nginx` / 安装更新回滚脚本）和 `.sha256`
+            - **Linux 云机 WebUI (ARM64)**: `cc-switch-webd-linux-arm64.tar.gz`（含 `systemd` / `nginx` / 安装更新回滚脚本）和 `.sha256`
 
-            > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
+            > 桌面端 `.tar.gz` 为 Tauri updater 自动更新专用；`cc-switch-webd-linux-*.tar.gz` 是云机 WebUI 安装包。
 
             ---
-            macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。
+            macOS DMG 已在发布流程中完成可读性验证；Apple 代码签名和公证取决于仓库密钥配置。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -590,6 +734,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-lich13\.([0-9]+)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+          fi
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"
           # 初始化空平台映射
@@ -604,7 +751,7 @@ jobs:
             url="$base_url/$fname"
             sig_content=$(cat "$sig")
             case "$fname" in
-              *.tar.gz)
+              CC-Switch-*-macOS.tar.gz)
                 # 视为 macOS updater artifact
                 mac_url="$url"; mac_sig="$sig_content";;
               *-Linux-arm64.AppImage|*-Linux-arm64.appimage)

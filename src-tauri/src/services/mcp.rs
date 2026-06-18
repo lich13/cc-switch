@@ -10,6 +10,13 @@ use crate::store::AppState;
 pub struct McpService;
 
 impl McpService {
+    fn reject_codex_mcp_live_write_if_needed() -> Result<(), AppError> {
+        if crate::codex_config::get_codex_config_dir().exists() {
+            crate::codex_config::reject_codex_live_write()?;
+        }
+        Ok(())
+    }
+
     /// 获取所有 MCP 服务器（统一结构）
     pub fn get_all_servers(state: &AppState) -> Result<IndexMap<String, McpServer>, AppError> {
         state.db.get_all_mcp_servers()
@@ -24,6 +31,10 @@ impl McpService {
             .get(&server.id)
             .map(|s| s.apps.clone())
             .unwrap_or_default();
+
+        if prev_apps.codex || server.apps.codex {
+            Self::reject_codex_mcp_live_write_if_needed()?;
+        }
 
         state.db.save_mcp_server(&server)?;
 
@@ -55,6 +66,10 @@ impl McpService {
         let server = state.db.get_all_mcp_servers()?.shift_remove(id);
 
         if let Some(server) = server {
+            if server.apps.codex {
+                Self::reject_codex_mcp_live_write_if_needed()?;
+            }
+
             state.db.delete_mcp_server(id)?;
 
             // 从所有应用的 live 配置中移除
@@ -75,6 +90,10 @@ impl McpService {
         let mut servers = state.db.get_all_mcp_servers()?;
 
         if let Some(server) = servers.get_mut(server_id) {
+            if matches!(app, AppType::Codex) {
+                Self::reject_codex_mcp_live_write_if_needed()?;
+            }
+
             server.apps.set_enabled_for(&app, enabled);
             state.db.save_mcp_server(server)?;
 
@@ -181,7 +200,10 @@ impl McpService {
         let servers = Self::get_all_servers(state)?;
 
         for app in AppType::all() {
-            if matches!(app, AppType::OpenClaw | AppType::ClaudeDesktop) {
+            if matches!(
+                app,
+                AppType::Codex | AppType::OpenClaw | AppType::ClaudeDesktop
+            ) {
                 continue;
             }
 

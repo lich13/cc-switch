@@ -30,6 +30,7 @@ import {
 import type { AppId } from "@/lib/api/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi, skillsApi } from "@/lib/api";
+import { isWebRuntime } from "@/lib/runtime";
 import { toast } from "sonner";
 import { SKILLS_APP_IDS } from "@/config/appConfig";
 import { AppCountBar } from "@/components/common/AppCountBar";
@@ -43,6 +44,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
+const WEB_SKILLS_APP_IDS: AppId[] = ["claude", "codex", "gemini"];
 
 interface UnifiedSkillsPanelProps {
   onOpenDiscovery: () => void;
@@ -69,6 +72,8 @@ const UnifiedSkillsPanel = React.forwardRef<
   UnifiedSkillsPanelProps
 >(({ onOpenDiscovery, currentApp }, ref) => {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
+  const skillsAppIds = isWeb ? WEB_SKILLS_APP_IDS : SKILLS_APP_IDS;
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -337,11 +342,21 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   React.useImperativeHandle(ref, () => ({
-    openDiscovery: onOpenDiscovery,
-    openImport: handleOpenImport,
-    openInstallFromZip: handleInstallFromZip,
-    openRestoreFromBackup: handleOpenRestoreFromBackup,
-    checkUpdates: handleCheckUpdates,
+    openDiscovery: () => {
+      if (!isWeb) onOpenDiscovery();
+    },
+    openImport: () => {
+      if (!isWeb) void handleOpenImport();
+    },
+    openInstallFromZip: () => {
+      if (!isWeb) void handleInstallFromZip();
+    },
+    openRestoreFromBackup: () => {
+      if (!isWeb) void handleOpenRestoreFromBackup();
+    },
+    checkUpdates: () => {
+      if (!isWeb) void handleCheckUpdates();
+    },
   }));
 
   return (
@@ -350,53 +365,55 @@ const UnifiedSkillsPanel = React.forwardRef<
         <AppCountBar
           totalLabel={t("skills.installed", { count: skills?.length || 0 })}
           counts={enabledCounts}
-          appIds={SKILLS_APP_IDS}
+          appIds={skillsAppIds}
         />
-        <div className="flex items-center gap-1.5">
-          <div
-            className="transition-all duration-300 ease-out overflow-hidden"
-            style={{
-              maxWidth:
-                skillUpdates && skillUpdates.length > 0 ? "200px" : "0px",
-              opacity: skillUpdates && skillUpdates.length > 0 ? 1 : 0,
-            }}
-          >
+        {!isWeb && (
+          <div className="flex items-center gap-1.5">
+            <div
+              className="transition-all duration-300 ease-out overflow-hidden"
+              style={{
+                maxWidth:
+                  skillUpdates && skillUpdates.length > 0 ? "200px" : "0px",
+                opacity: skillUpdates && skillUpdates.length > 0 ? 1 : 0,
+              }}
+            >
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1 whitespace-nowrap"
+                onClick={handleUpdateAll}
+                disabled={isUpdatingAll || updateSkillMutation.isPending}
+              >
+                {isUpdatingAll ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={12} />
+                )}
+                {isUpdatingAll
+                  ? t("skills.updatingAll")
+                  : t("skills.updateAll", { count: skillUpdates?.length ?? 0 })}
+              </Button>
+            </div>
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className="h-7 text-xs gap-1 whitespace-nowrap"
-              onClick={handleUpdateAll}
-              disabled={isUpdatingAll || updateSkillMutation.isPending}
+              className="h-7 text-xs gap-1"
+              onClick={handleCheckUpdates}
+              disabled={isCheckingUpdates || !skills || skills.length === 0}
             >
-              {isUpdatingAll ? (
+              {isCheckingUpdates ? (
                 <Loader2 size={12} className="animate-spin" />
               ) : (
                 <RefreshCw size={12} />
               )}
-              {isUpdatingAll
-                ? t("skills.updatingAll")
-                : t("skills.updateAll", { count: skillUpdates?.length ?? 0 })}
+              {isCheckingUpdates
+                ? t("skills.checkingUpdates")
+                : t("skills.checkUpdates")}
             </Button>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 text-xs gap-1"
-            onClick={handleCheckUpdates}
-            disabled={isCheckingUpdates || !skills || skills.length === 0}
-          >
-            {isCheckingUpdates ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <RefreshCw size={12} />
-            )}
-            {isCheckingUpdates
-              ? t("skills.checkingUpdates")
-              : t("skills.checkUpdates")}
-          </Button>
-        </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
@@ -431,6 +448,8 @@ const UnifiedSkillsPanel = React.forwardRef<
                   onToggleApp={handleToggleApp}
                   onUninstall={() => handleUninstall(skill)}
                   onUpdate={() => handleUpdateSkill(skill)}
+                  canManageFiles={!isWeb}
+                  appIds={skillsAppIds}
                   isLast={index === skills.length - 1}
                 />
               ))}
@@ -484,6 +503,8 @@ interface InstalledSkillListItemProps {
   onToggleApp: (id: string, app: AppId, enabled: boolean) => void;
   onUninstall: () => void;
   onUpdate?: () => void;
+  canManageFiles: boolean;
+  appIds: AppId[];
   isLast?: boolean;
 }
 
@@ -494,6 +515,8 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
   onToggleApp,
   onUninstall,
   onUpdate,
+  canManageFiles,
+  appIds,
   isLast,
 }) => {
   const { t } = useTranslation();
@@ -555,41 +578,43 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
       <AppToggleGroup
         apps={skill.apps}
         onToggle={(app, enabled) => onToggleApp(skill.id, app, enabled)}
-        appIds={SKILLS_APP_IDS}
+        appIds={appIds}
       />
 
-      <div
-        className="flex-shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-        style={hasUpdate ? { opacity: 1 } : undefined}
-      >
-        {hasUpdate && onUpdate && (
+      {canManageFiles && (
+        <div
+          className="flex-shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+          style={hasUpdate ? { opacity: 1 } : undefined}
+        >
+          {hasUpdate && onUpdate && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 hover:text-blue-500 hover:bg-blue-100 dark:hover:text-blue-400 dark:hover:bg-blue-500/10"
+              onClick={onUpdate}
+              disabled={isUpdating}
+              title={t("skills.update")}
+            >
+              {isUpdating ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <RefreshCw size={14} />
+              )}
+            </Button>
+          )}
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="h-7 w-7 hover:text-blue-500 hover:bg-blue-100 dark:hover:text-blue-400 dark:hover:bg-blue-500/10"
-            onClick={onUpdate}
-            disabled={isUpdating}
-            title={t("skills.update")}
+            className="h-7 w-7 hover:text-red-500 hover:bg-red-100 dark:hover:text-red-400 dark:hover:bg-red-500/10"
+            onClick={onUninstall}
+            title={t("skills.uninstall")}
           >
-            {isUpdating ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <RefreshCw size={14} />
-            )}
+            <Trash2 size={14} />
           </Button>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 hover:text-red-500 hover:bg-red-100 dark:hover:text-red-400 dark:hover:bg-red-500/10"
-          onClick={onUninstall}
-          title={t("skills.uninstall")}
-        >
-          <Trash2 size={14} />
-        </Button>
-      </div>
+        </div>
+      )}
     </ListItemRow>
   );
 };

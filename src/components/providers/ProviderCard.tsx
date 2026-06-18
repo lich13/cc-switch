@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import { GripVertical, ChevronDown, ChevronUp, ImageOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -26,6 +26,7 @@ import {
 } from "@/utils/providerConfigUtils";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
+import { Switch } from "@/components/ui/switch";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -59,6 +60,10 @@ interface ProviderCardProps {
   failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
+  onToggleImageGenerationPolicy?: (
+    provider: Provider,
+    enabled: boolean,
+  ) => void;
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -97,6 +102,39 @@ function isOfficialProvider(provider: Provider, appId: AppId): boolean {
       (!baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === ""))
     );
   }
+  return false;
+}
+
+function providerSupportsImageGenerationPolicy(
+  provider: Provider,
+  appId: AppId,
+): boolean {
+  if (provider.category === "official") {
+    return false;
+  }
+  if (
+    provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH ||
+    provider.meta?.providerType === PROVIDER_TYPES.GITHUB_COPILOT
+  ) {
+    return false;
+  }
+
+  if (appId === "codex") {
+    return true;
+  }
+  if (
+    appId === "claude-desktop" &&
+    provider.meta?.claudeDesktopMode !== "proxy"
+  ) {
+    return false;
+  }
+  if (appId === "claude" || appId === "claude-desktop") {
+    const apiFormat =
+      provider.meta?.apiFormat ??
+      (provider.settingsConfig as Record<string, any>)?.api_format;
+    return apiFormat === "openai_chat" || apiFormat === "openai_responses";
+  }
+
   return false;
 }
 
@@ -158,6 +196,7 @@ export function ProviderCard({
   failoverPriority,
   isInFailoverQueue = false,
   onToggleFailover,
+  onToggleImageGenerationPolicy,
   activeProviderId,
   // OpenClaw: default model
   isDefaultModel,
@@ -232,6 +271,14 @@ export function ProviderCard({
     provider.meta?.apiFormat,
     (provider.settingsConfig as Record<string, any>)?.config,
   ]);
+  const supportsImageGenerationPolicy = providerSupportsImageGenerationPolicy(
+    provider,
+    appId,
+  );
+  const imageGenerationPolicyEnabled =
+    provider.meta?.disableImageGeneration === true ||
+    provider.meta?.disableImageGeneration === "chat";
+
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
   const shouldAutoQuery =
@@ -466,6 +513,22 @@ export function ProviderCard({
         </div>
 
         <div className="flex items-center ml-auto min-w-0 gap-3">
+          {supportsImageGenerationPolicy && onToggleImageGenerationPolicy && (
+            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-2 py-1">
+              <ImageOff className="h-3.5 w-3.5 text-rose-500" />
+              <Switch
+                aria-label={t("provider.disableImageGenerationInChat")}
+                title={t("provider.disableImageGenerationInChatDescription")}
+                checked={imageGenerationPolicyEnabled}
+                onClick={(event) => event.stopPropagation()}
+                onCheckedChange={(checked) =>
+                  onToggleImageGenerationPolicy(provider, checked)
+                }
+                className="h-5 w-9 data-[state=checked]:bg-rose-500 dark:data-[state=checked]:bg-rose-600"
+              />
+            </div>
+          )}
+
           <div className="ml-auto">
             <div className="flex items-center gap-1">
               {isCopilot ? (

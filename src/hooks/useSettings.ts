@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { providersApi, settingsApi } from "@/lib/api";
+import { isWebRuntime } from "@/lib/runtime";
 import { syncCurrentProvidersLiveSafe } from "@/utils/postChangeSync";
 import { useSettingsQuery, useSaveSettingsMutation } from "@/lib/query";
 import type { Settings } from "@/types";
@@ -61,6 +62,7 @@ const sanitizeDir = (value?: string | null): string | undefined => {
  */
 export function useSettings(): UseSettingsResult {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
   const { data } = useSettingsQuery();
   const saveMutation = useSaveSettingsMutation();
   const queryClient = useQueryClient();
@@ -133,6 +135,7 @@ export function useSettings(): UseSettingsResult {
       enabled: boolean | undefined,
       prevEnabled: boolean | undefined,
     ): Promise<boolean> => {
+      if (isWeb) return false;
       if (enabled === undefined || enabled === prevEnabled) return false;
       try {
         if (enabled) {
@@ -173,7 +176,7 @@ export function useSettings(): UseSettingsResult {
         return false;
       }
     },
-    [t],
+    [isWeb, t],
   );
 
   // 即时保存设置（用于 General 标签页的实时更新）
@@ -220,6 +223,7 @@ export function useSettings(): UseSettingsResult {
 
         // 如果开机自启状态改变，调用系统 API
         if (
+          !isWeb &&
           payload.launchOnStartup !== undefined &&
           payload.launchOnStartup !== data?.launchOnStartup
         ) {
@@ -239,6 +243,7 @@ export function useSettings(): UseSettingsResult {
         // 仅在本次更新包含 skipClaudeOnboarding 时触发，避免其它自动保存误触发
         const nextSkipClaudeOnboarding = updates.skipClaudeOnboarding;
         if (
+          !isWeb &&
           nextSkipClaudeOnboarding !== undefined &&
           nextSkipClaudeOnboarding !== (data?.skipClaudeOnboarding ?? false)
         ) {
@@ -301,7 +306,15 @@ export function useSettings(): UseSettingsResult {
         throw error;
       }
     },
-    [data, queryClient, saveMutation, settings, syncClaudePluginIfChanged, t],
+    [
+      data,
+      isWeb,
+      queryClient,
+      saveMutation,
+      settings,
+      syncClaudePluginIfChanged,
+      t,
+    ],
   );
 
   // 完整保存设置（用于 Advanced 标签页的手动保存）
@@ -354,10 +367,13 @@ export function useSettings(): UseSettingsResult {
 
         await saveMutation.mutateAsync(payload);
 
-        await settingsApi.setAppConfigDirOverride(sanitizedAppDir ?? null);
+        if (!isWeb) {
+          await settingsApi.setAppConfigDirOverride(sanitizedAppDir ?? null);
+        }
 
         // 只在开机自启状态真正改变时调用系统 API
         if (
+          !isWeb &&
           payload.launchOnStartup !== undefined &&
           payload.launchOnStartup !== data?.launchOnStartup
         ) {
@@ -376,7 +392,7 @@ export function useSettings(): UseSettingsResult {
         // Claude Code 初次安装确认：开=写入 hasCompletedOnboarding=true；关=删除该字段
         const prevSkipClaudeOnboarding = data?.skipClaudeOnboarding ?? false;
         const nextSkipClaudeOnboarding = payload.skipClaudeOnboarding ?? false;
-        if (nextSkipClaudeOnboarding !== prevSkipClaudeOnboarding) {
+        if (!isWeb && nextSkipClaudeOnboarding !== prevSkipClaudeOnboarding) {
           try {
             if (nextSkipClaudeOnboarding) {
               await settingsApi.applyClaudeOnboardingSkip();
@@ -430,6 +446,7 @@ export function useSettings(): UseSettingsResult {
         const opencodeDirChanged = sanitizedOpencodeDir !== previousOpencodeDir;
         const openclawDirChanged = sanitizedOpenclawDir !== previousOpenclawDir;
         if (
+          !isWeb &&
           !pluginSynced &&
           (claudeDirChanged ||
             codexDirChanged ||
@@ -447,7 +464,7 @@ export function useSettings(): UseSettingsResult {
         }
 
         const appDirChanged = sanitizedAppDir !== (previousAppDir ?? undefined);
-        setRequiresRestart(appDirChanged);
+        setRequiresRestart(!isWeb && appDirChanged);
 
         if (!options?.silent) {
           toast.success(
@@ -458,7 +475,7 @@ export function useSettings(): UseSettingsResult {
           );
         }
 
-        return { requiresRestart: appDirChanged };
+        return { requiresRestart: !isWeb && appDirChanged };
       } catch (error) {
         console.error("[useSettings] Failed to save settings", error);
         toast.error(
@@ -478,6 +495,7 @@ export function useSettings(): UseSettingsResult {
       saveMutation,
       settings,
       setRequiresRestart,
+      isWeb,
       syncClaudePluginIfChanged,
       t,
     ],

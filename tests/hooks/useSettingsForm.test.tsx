@@ -51,6 +51,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.disableImageGeneration).toBe(false);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
@@ -103,6 +104,36 @@ describe("useSettingsForm Hook", () => {
     expect(result.current.initialLanguage).toBe("zh-TW");
     expect(changeLanguageSpy).toHaveBeenCalledWith("zh-TW");
   });
+
+  it.each([
+    ["chat", "chat"],
+    [true, true],
+    [false, false],
+    [null, false],
+    ["unknown", false],
+  ])(
+    "should normalize disableImageGeneration %s on initialization",
+    async (input, expected) => {
+      useSettingsQueryMock.mockReturnValue({
+        data: {
+          showInTray: true,
+          minimizeToTrayOnClose: true,
+          enableClaudePluginIntegration: false,
+          disableImageGeneration: input,
+          claudeConfigDir: null,
+          codexConfigDir: null,
+          language: "zh",
+        },
+        isLoading: false,
+      });
+
+      const { result } = renderHook(() => useSettingsForm());
+
+      await waitFor(() => {
+        expect(result.current.settings?.disableImageGeneration).toBe(expected);
+      });
+    },
+  );
 
   it("should prioritize reading language from local storage in readPersistedLanguage", () => {
     useSettingsQueryMock.mockReturnValue({
@@ -183,6 +214,47 @@ describe("useSettingsForm Hook", () => {
     expect(settings.language).toBe("zh");
     expect(result.current.initialLanguage).toBe("en");
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
+  });
+
+  it("should normalize disableImageGeneration in updateSettings and resetSettings", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: "chat",
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings?.disableImageGeneration).toBe("chat");
+    });
+
+    act(() => {
+      result.current.updateSettings({
+        disableImageGeneration: "unknown",
+      } as any);
+    });
+    expect(result.current.settings?.disableImageGeneration).toBe(false);
+
+    act(() => {
+      result.current.resetSettings({
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        enableClaudePluginIntegration: false,
+        disableImageGeneration: null,
+        claudeConfigDir: null,
+        codexConfigDir: null,
+        language: "zh",
+      } as any);
+    });
+    expect(result.current.settings?.disableImageGeneration).toBe(false);
   });
 
   it("should not call changeLanguage repeatedly when language is consistent in syncLanguage", async () => {

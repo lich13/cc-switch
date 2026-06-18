@@ -1,4 +1,4 @@
-import { getVersion } from "@tauri-apps/api/app";
+import { getVersion, isWebRuntime } from "@/lib/runtime";
 
 export type UpdateChannel = "stable" | "beta";
 
@@ -27,6 +27,10 @@ export async function checkForUpdate(
 ): Promise<
   { status: "up-to-date" } | { status: "available"; info: UpdateInfo }
 > {
+  if (isWebRuntime()) {
+    return { status: "up-to-date" };
+  }
+
   // 动态引入，避免在未安装插件时导致打包期问题
   const { check } = await import("@tauri-apps/plugin-updater");
 

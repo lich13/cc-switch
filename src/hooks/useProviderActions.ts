@@ -18,6 +18,7 @@ import {
   useSwitchProviderMutation,
 } from "@/lib/query";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { isWebRuntime } from "@/lib/runtime";
 import { openclawKeys } from "@/hooks/useOpenClaw";
 import {
   extractCodexWireApi,
@@ -35,6 +36,7 @@ export function useProviderActions(
 ) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const isWeb = isWebRuntime();
 
   const addProviderMutation = useAddProviderMutation(activeApp);
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
@@ -44,6 +46,7 @@ export function useProviderActions(
   // Claude 插件同步逻辑
   const syncClaudePlugin = useCallback(
     async (provider: Provider) => {
+      if (isWeb) return;
       if (activeApp !== "claude") return;
 
       try {
@@ -65,7 +68,7 @@ export function useProviderActions(
         toast.error(detail, { duration: 4200 });
       }
     },
-    [activeApp, t],
+    [activeApp, isWeb, t],
   );
 
   // 添加供应商

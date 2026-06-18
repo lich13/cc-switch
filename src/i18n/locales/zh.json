@@ -145,6 +145,8 @@
     "officialPartner": "官方合作伙伴",
     "managedByHermes": "Hermes 托管",
     "managedByHermesHint": "该条目定义在 Hermes 的 providers: dict，请在 Hermes Web UI 中编辑或删除。",
+    "disableImageGenerationInChat": "聊天禁用图片生成",
+    "disableImageGenerationInChatDescription": "移除聊天/Responses 请求中的 OpenAI image_generation 工具",
     "openTerminal": "打开终端",
     "terminalOpened": "终端已打开",
     "terminalOpenFailed": "打开终端失败",
@@ -321,6 +323,8 @@
     "tabAuth": "认证",
     "tabAdvanced": "高级",
     "tabProxy": "路由",
+    "disableImageGenerationInChat": "聊天禁用图片生成",
+    "disableImageGenerationInChatDescription": "开启后，本地路由会移除聊天/Responses 请求中的 OpenAI 内建 image_generation 工具；图片接口不受影响。",
     "authCenter": {
       "title": "OAuth 认证中心",
       "description": "在 Claude Code 中使用您的其他订阅，请注意合规风险。",
@@ -387,6 +391,29 @@
         "mediaHeuristic": "启发式纯文本模型识别",
         "mediaHeuristicDescription": "发送前按内置模型名列表预测性剥离图片。关闭后仅保留「已声明纯文本」与「上游报错兜底」两条事实驱动路径，避免内置列表把多模态模型误判为纯文本而静默丢图"
       },
+      "userAgentRewrite": {
+        "title": "User-Agent 替换",
+        "description": "按正则匹配客户端 User-Agent，并按应用替换为指定目标 UA",
+        "saveHint": "启用开关会立即保存；目标 UA 和匹配规则需点击保存后生效。",
+        "enabled": "启用 User-Agent 替换",
+        "enabledDescription": "关闭后不会改写任何请求的 User-Agent",
+        "claudeTarget": "Claude 目标 UA",
+        "codexTarget": "Codex 目标 UA",
+        "rules": "匹配正则",
+        "rulesPlaceholder": "^OpenAI/Python [0-9.]+$",
+        "rulesDescription": "共享匹配规则。启用的规则命中后，再按应用替换为对应目标 User-Agent。",
+        "ruleEnabled": "启用规则",
+        "addRule": "新增规则",
+        "deleteRule": "删除规则",
+        "claudeTargetRequired": "Claude 目标 User-Agent 不能为空",
+        "codexTargetRequired": "Codex 目标 User-Agent 不能为空",
+        "tooManyRules": "User-Agent 替换规则过多",
+        "emptyRule": "已启用的 User-Agent 正则不能为空",
+        "invalidRegex": "已启用的 User-Agent 正则无效",
+        "save": "保存",
+        "saving": "保存中...",
+        "saved": "User-Agent 替换配置已保存"
+      },
       "optimizer": {
         "title": "Bedrock 请求优化器",
         "description": "在请求发送前自动优化 Thinking 和 Cache 配置（仅 Bedrock 供应商生效）",
@@ -421,6 +448,10 @@
           "debug": "详细信息，包含 SSE 流和请求/响应详情",
           "trace": "全部日志，最详细"
         }
+      },
+      "providerData": {
+        "title": "供应商导入导出",
+        "description": "仅导入或导出当前所有供应商，不包含应用设置和数据库备份"
       }
     },
     "language": "界面语言",
@@ -868,7 +899,32 @@
       "defaultCostMultiplierRequired": "默认倍率不能为空",
       "defaultCostMultiplierInvalid": "默认倍率格式不正确"
     },
-    "saveFailedGeneric": "保存失败，请重试"
+    "saveFailedGeneric": "保存失败，请重试",
+    "providerImportExport": "供应商导入导出",
+    "providerImportExportHint": "只处理当前保存的供应商数据，和 SQL 全配置备份相互独立。导出的 JSON 会包含 API Key/Token 等密钥，请作为敏感文件保存。",
+    "importProviders": "导入供应商",
+    "exportProviders": "导出供应商",
+    "exportProvidersSub2api": "导出 sub2api",
+    "importingProviders": "正在导入供应商...",
+    "exportingProviders": "正在导出供应商...",
+    "providerImportSuccess": "供应商导入成功",
+    "providerExportSuccess": "供应商已导出",
+    "providerImportFailed": "导入供应商失败",
+    "providerExportFailed": "导出供应商失败",
+    "providerImportFailedError": "导入供应商失败：{{message}}",
+    "providerExportFailedError": "导出供应商失败：{{message}}",
+    "providerTransferDone": "供应商操作完成",
+    "providerTransferDoneHint": "供应商列表已更新，请按需刷新主页面。",
+    "providerTransferFailed": "供应商操作失败",
+    "sub2apiExportDialog": {
+      "title": "选择 sub2api 导出账号",
+      "description": "只会导出已勾选且当前仍可解析 API Key 和 Base URL 的供应商账号。",
+      "selectedCount": "已选择 {{count}} 个账号",
+      "selectAll": "全选",
+      "clear": "清空",
+      "export": "导出",
+      "empty": "没有可导出的账号"
+    }
   },
   "apps": {
     "claude": "Claude",

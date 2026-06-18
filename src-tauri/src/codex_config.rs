@@ -15,6 +15,23 @@ pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 
+pub fn codex_live_write_disabled_error() -> AppError {
+    AppError::localized(
+        "codex.live.write_disabled",
+        "已禁用写入或删除 Codex auth.json/config.toml",
+        "Writing or deleting Codex auth.json/config.toml is disabled",
+    )
+}
+
+pub fn reject_codex_live_write() -> Result<(), AppError> {
+    #[cfg(test)]
+    if std::env::var_os("CC_SWITCH_TEST_ALLOW_CODEX_LIVE_WRITE").is_some() {
+        return Ok(());
+    }
+
+    Err(codex_live_write_disabled_error())
+}
+
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
 /// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
 /// removed provider aliases.
@@ -85,6 +102,8 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    reject_codex_live_write()?;
+
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -179,6 +198,8 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
 /// and provider-scoped bearer tokens live in `config.toml`. Provider switches
 /// should not overwrite the user's ChatGPT login cache.
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
+    reject_codex_live_write()?;
+
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
         Some(config_text) => config_text.to_string(),
@@ -890,6 +911,8 @@ pub fn write_codex_provider_live_with_catalog(
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
+    reject_codex_live_write()?;
+
     let prepared_config = config_text
         .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
         .transpose()?;
@@ -1224,6 +1247,8 @@ pub fn write_codex_live_for_provider(
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
+    reject_codex_live_write()?;
+
     let unified_official_config =
         if category == Some("official") && crate::settings::unify_codex_session_history() {
             Some(inject_codex_unified_session_bucket(
@@ -1328,6 +1353,7 @@ pub fn restore_codex_settings_for_backfill(
 /// - `"model"` / `"model_catalog_json"`: writes to top-level field.
 ///
 /// Empty value removes the field.
+#[cfg(test)]
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
     let mut doc = toml_str
         .parse::<DocumentMut>()
@@ -1388,6 +1414,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
 /// Remove `base_url` from the active model_provider section only if it matches `predicate`.
 /// Also removes top-level `base_url` if it matches.
 /// Used by proxy cleanup to strip local proxy URLs without touching user-configured URLs.
+#[cfg(test)]
 pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) -> bool) -> String {
     let mut doc = match toml_str.parse::<DocumentMut>() {
         Ok(doc) => doc,
@@ -1437,6 +1464,99 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct IsolatedHome {
+        _temp: tempfile::TempDir,
+        old_test_home: Option<OsString>,
+        old_home: Option<OsString>,
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.old_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn isolated_home() -> IsolatedHome {
+        let temp = tempfile::tempdir().expect("create temp home");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings for isolated home");
+
+        IsolatedHome {
+            _temp: temp,
+            old_test_home,
+            old_home,
+        }
+    }
+
+    fn assert_codex_write_disabled(err: &AppError) {
+        let message = err.to_string();
+        assert!(
+            message.contains("禁用") || message.contains("disabled"),
+            "error should explain Codex live writes are disabled, got: {message}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_codex_live_atomic_returns_disabled_error_and_preserves_files() {
+        let _home = isolated_home();
+        std::fs::create_dir_all(get_codex_config_dir()).expect("create codex dir");
+        let auth_path = get_codex_auth_path();
+        let config_path = get_codex_config_path();
+        let original_auth = r#"{"OPENAI_API_KEY":"original"}"#;
+        let original_config = "model = \"gpt-5\"\n";
+        std::fs::write(&auth_path, original_auth).expect("seed auth.json");
+        std::fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let err = write_codex_live_atomic(
+            &json!({"OPENAI_API_KEY": "changed"}),
+            Some("model = \"gpt-5.5\"\n"),
+        )
+        .expect_err("Codex live write should be disabled");
+
+        assert_codex_write_disabled(&err);
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read auth.json"),
+            original_auth
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config.toml"),
+            original_config
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_codex_live_config_atomic_returns_disabled_error_and_preserves_config() {
+        let _home = isolated_home();
+        std::fs::create_dir_all(get_codex_config_dir()).expect("create codex dir");
+        let config_path = get_codex_config_path();
+        let original_config = "model = \"gpt-5\"\n";
+        std::fs::write(&config_path, original_config).expect("seed config.toml");
+
+        let err = write_codex_live_config_atomic(Some("model = \"gpt-5.5\"\n"))
+            .expect_err("Codex config.toml write should be disabled");
+
+        assert_codex_write_disabled(&err);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config.toml"),
+            original_config
+        );
+    }
 
     #[test]
     fn unified_session_bucket_injects_for_empty_official_config() {
