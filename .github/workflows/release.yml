@@ -303,14 +303,18 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
             pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
+            $desktopBinary = 'src-tauri/target/aarch64-pc-windows-msvc/release/cc-switch.exe'
+            $webdBinary = 'src-tauri/target/aarch64-pc-windows-msvc/release/cc-switch-webd.exe'
           } else {
             pnpm tauri build
+            $desktopBinary = 'src-tauri/target/release/cc-switch.exe'
+            $webdBinary = 'src-tauri/target/release/cc-switch-webd.exe'
           }
-          if (-not (Test-Path 'src-tauri/target/release/cc-switch.exe')) {
-            throw 'Desktop build did not produce src-tauri/target/release/cc-switch.exe'
+          if (-not (Test-Path $desktopBinary)) {
+            throw "Desktop build did not produce $desktopBinary"
           }
-          if (Test-Path 'src-tauri/target/release/cc-switch-webd.exe') {
-            throw 'Desktop build unexpectedly produced cc-switch-webd.exe'
+          if (Test-Path $webdBinary) {
+            throw "Desktop build unexpectedly produced $webdBinary"
           }
 
       - name: Build Tauri App (Linux)
