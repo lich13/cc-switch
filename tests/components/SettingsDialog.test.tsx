@@ -448,6 +448,20 @@ describe("SettingsPage Component", () => {
     expect(importExportMock.clearSelection).toHaveBeenCalled();
   });
 
+  it("should reset tab content scroll position when switching settings tabs", () => {
+    const { container } = renderSettingsPage();
+    const scrollContainer = container.querySelector(
+      ".overflow-y-auto",
+    ) as HTMLDivElement | null;
+
+    expect(scrollContainer).not.toBeNull();
+
+    scrollContainer!.scrollTop = 640;
+    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+
+    expect(scrollContainer!.scrollTop).toBe(0);
+  });
+
   it("should pass onImportSuccess callback to useImportExport hook", async () => {
     const onImportSuccess = vi.fn();
 

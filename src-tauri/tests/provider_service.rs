@@ -569,13 +569,27 @@ wire_api = "responses"
         .update_proxy_config(proxy_config)
         .await
         .expect("set proxy to ephemeral port");
+
     let before = codex_live_file_bytes();
 
-    assert_codex_switch_route_only_updates_current(
-        &state,
-        "deepseek-provider",
-        Some("official-provider"),
-        &before,
+    ProviderService::switch(&state, AppType::Codex, "deepseek-provider")
+        .expect("switch from official subscription to DeepSeek route");
+    assert_codex_live_files_unchanged(&before);
+
+    let auth_after_switch: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth after switch");
+    assert_eq!(
+        auth_after_switch, oauth_auth,
+        "normal provider switch with Codex preservation enabled must keep OAuth auth.json"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider after route-only switch")
+            .as_deref(),
+        Some("deepseek-provider"),
+        "normal Codex switch should update the local route without writing live files"
     );
 
     state
@@ -593,6 +607,14 @@ wire_api = "responses"
             .enabled,
         "route-only takeover should mark Codex enabled"
     );
+
+    let auth_after_takeover: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth after takeover");
+    assert_eq!(
+        auth_after_takeover, oauth_auth,
+        "enabling route-only takeover must not rewrite Codex OAuth auth.json"
+    );
+
     assert!(
         state
             .db
