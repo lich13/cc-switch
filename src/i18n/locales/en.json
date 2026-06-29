@@ -48,6 +48,15 @@
     "bodyOfficial": "An “Official” preset is also included in the list — click it any time you want to switch back to the official default. CC Switch automatically backs up your current config to “default” before switching, so you can move back and forth freely. That's how CC Switch works 😊",
     "confirm": "Got it"
   },
+  "webAuth": {
+    "subtitle": "Sign in to manage this server",
+    "username": "Username",
+    "password": "Password",
+    "login": "Log in",
+    "turnstileRequired": "Complete Turnstile verification first",
+    "turnstileUnavailable": "Turnstile verification is unavailable. Refresh and try again.",
+    "turnstileLoadFailed": "Failed to load Turnstile"
+  },
   "apiKeyInput": {
     "placeholder": "Enter API Key",
     "show": "Show API Key",

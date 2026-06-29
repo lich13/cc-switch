@@ -48,6 +48,15 @@
     "bodyOfficial": "列表里还预置了 “官方（Official）” 供应商，随时点一下即可切回官方默认配置。切换前 CC Switch 会自动把当前配置备份回 default，可以放心来回切。CC Switch 就是这样工作的 😊",
     "confirm": "我知道了"
   },
+  "webAuth": {
+    "subtitle": "登录云机管理面",
+    "username": "用户名",
+    "password": "密码",
+    "login": "登录",
+    "turnstileRequired": "请先完成 Turnstile 校验",
+    "turnstileUnavailable": "Turnstile 校验暂时不可用，请刷新后重试",
+    "turnstileLoadFailed": "加载 Turnstile 失败"
+  },
   "apiKeyInput": {
     "placeholder": "请输入API Key",
     "show": "显示API Key",

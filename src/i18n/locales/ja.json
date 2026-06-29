@@ -48,6 +48,15 @@
     "bodyOfficial": "リストには「Official（公式）」プリセットも用意されており、公式バージョンに戻したくなったらクリックするだけで切り替えられます。切り替える前に現在の設定は自動で default にバックアップされるので、自由に行き来できます。これが CC Switch の仕組みです 😊",
     "confirm": "了解しました"
   },
+  "webAuth": {
+    "subtitle": "サーバー管理画面にログイン",
+    "username": "ユーザー名",
+    "password": "パスワード",
+    "login": "ログイン",
+    "turnstileRequired": "先に Turnstile 認証を完了してください",
+    "turnstileUnavailable": "Turnstile 認証を一時的に利用できません。更新して再試行してください。",
+    "turnstileLoadFailed": "Turnstile の読み込みに失敗しました"
+  },
   "apiKeyInput": {
     "placeholder": "API Key を入力",
     "show": "API Key を表示",

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, LockKeyhole } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -61,7 +62,7 @@ function loadTurnstileScript(): Promise<void> {
       existing.addEventListener("load", () => resolve(), { once: true });
       existing.addEventListener(
         "error",
-        () => reject(new Error("加载 Turnstile 失败")),
+        () => reject(new Error("turnstile_load_failed")),
         { once: true },
       );
       return;
@@ -75,7 +76,7 @@ function loadTurnstileScript(): Promise<void> {
     script.addEventListener("load", () => resolve(), { once: true });
     script.addEventListener(
       "error",
-      () => reject(new Error("加载 Turnstile 失败")),
+      () => reject(new Error("turnstile_load_failed")),
       { once: true },
     );
     document.head.appendChild(script);
@@ -97,6 +98,7 @@ function TurnstileWidget({
   onToken: (token: string | null) => void;
   onError: (message: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -133,13 +135,19 @@ function TurnstileWidget({
           },
           "error-callback": () => {
             onToken(null);
-            onError("Turnstile 校验暂时不可用，请刷新后重试");
+            onError(t("webAuth.turnstileUnavailable"));
           },
         });
       })
       .catch((err) => {
         if (!cancelled) {
-          onError(err instanceof Error ? err.message : String(err));
+          onError(
+            err instanceof Error && err.message === "turnstile_load_failed"
+              ? t("webAuth.turnstileLoadFailed")
+              : err instanceof Error
+                ? err.message
+                : String(err),
+          );
         }
       });
 
@@ -153,7 +161,7 @@ function TurnstileWidget({
         window.turnstile.remove(widgetId);
       }
     };
-  }, [action, onError, onToken, resetKey, siteKey]);
+  }, [action, onError, onToken, resetKey, siteKey, t]);
 
   return (
     <div
@@ -165,6 +173,7 @@ function TurnstileWidget({
 }
 
 export function WebAuthGate({ children }: WebAuthGateProps) {
+  const { t } = useTranslation();
   const [checking, setChecking] = useState(isWebRuntime());
   const [authenticated, setAuthenticated] = useState(!isWebRuntime());
   const [publicSettings, setPublicSettings] =
@@ -217,7 +226,7 @@ export function WebAuthGate({ children }: WebAuthGateProps) {
     event.preventDefault();
     setError(null);
     if (turnstileEnabled && !turnstileToken) {
-      setError("请先完成 Turnstile 校验");
+      setError(t("webAuth.turnstileRequired"));
       return;
     }
     setSubmitting(true);
@@ -261,13 +270,15 @@ export function WebAuthGate({ children }: WebAuthGateProps) {
           </div>
           <div>
             <h1 className="text-lg font-semibold">CC Switch WebUI</h1>
-            <p className="text-sm text-muted-foreground">登录云机管理面</p>
+            <p className="text-sm text-muted-foreground">
+              {t("webAuth.subtitle")}
+            </p>
           </div>
         </div>
 
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="webui-username">用户名</Label>
+            <Label htmlFor="webui-username">{t("webAuth.username")}</Label>
             <Input
               id="webui-username"
               autoComplete="username"
@@ -276,7 +287,7 @@ export function WebAuthGate({ children }: WebAuthGateProps) {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="webui-password">密码</Label>
+            <Label htmlFor="webui-password">{t("webAuth.password")}</Label>
             <Input
               id="webui-password"
               type="password"
@@ -310,7 +321,7 @@ export function WebAuthGate({ children }: WebAuthGateProps) {
             }
           >
             {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            登录
+            {t("webAuth.login")}
           </Button>
         </div>
       </form>
