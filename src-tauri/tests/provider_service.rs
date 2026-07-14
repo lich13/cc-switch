@@ -970,6 +970,44 @@ fn provider_service_switch_codex_official_accounts_switch_route_only_without_aut
 }
 
 #[test]
+fn reapply_codex_official_live_returns_disabled_and_preserves_live_files() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": { "access_token": "official-token", "account_id": "acct" }
+    });
+    seed_codex_live_files(&live_auth, "model = \"gpt-5\"\n");
+
+    let mut config = MultiAppConfig::default();
+    let manager = config
+        .get_manager_mut(&AppType::Codex)
+        .expect("codex manager");
+    manager.current = "official-provider".to_string();
+    let mut provider = Provider::with_id(
+        "official-provider".to_string(),
+        "Official".to_string(),
+        json!({ "auth": live_auth, "config": "" }),
+        None,
+    );
+    provider.category = Some("official".to_string());
+    manager.providers.insert(provider.id.clone(), provider);
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+    let before = codex_live_file_bytes();
+    let err = cc_switch_lib::reapply_current_codex_official_live(&state)
+        .expect_err("RouteOnly must reject official live reapply");
+    match err {
+        AppError::Localized { key, .. } => assert_eq!(key, "codex.live.write_disabled"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_codex_live_files_unchanged(&before);
+}
+
+#[test]
 fn provider_service_switch_codex_route_only_keeps_provider_specific_model_provider_id() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
@@ -1867,6 +1905,225 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
     assert!(
         live_after.get("enableAllProjectMcpServers").is_none(),
         "deleted shared key must not be re-injected into the next provider"
+    );
+}
+
+/// Codex 全局使用 RouteOnly：切换只更新数据库路由，不读取用户自主管理的
+/// live 配置回填账号，也不把通用配置片段写入 live 文件。
+#[test]
+fn switch_codex_route_only_does_not_sync_live_into_common_config() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    // A 激活状态下的 live：A 专属路由 + 已共享的 [tui] + 用户刚加的
+    // disable_response_storage + cc-switch 注入产物 + MCP 同步投影
+    // + 顶层 wire_api（无 model_provider 时的 fallback 写法，属 A 的路由语义）
+    // + 历史错误格式 [mcp.servers]（sync_all_enabled 清不掉的孤儿形态）
+    let live_config = r#"model = "gpt-5.5"
+model_provider = "aprov"
+wire_api = "chat"
+experimental_bearer_token = "sk-a-live-secret"
+model_catalog_json = "cc-switch-model-catalog.json"
+web_search = "disabled"
+disable_response_storage = true
+
+[tui]
+notifications = true
+
+[model_providers.aprov]
+name = "A Prov"
+base_url = "https://a.example/v1"
+wire_api = "responses"
+
+[mcp_servers.echo]
+type = "stdio"
+command = "echo"
+
+[mcp.servers.ghost-legacy]
+command = "ghost-cmd"
+"#;
+    seed_codex_live_files(&json!({ "OPENAI_API_KEY": "sk-a" }), live_config);
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "a".to_string();
+        let mut provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-a" },
+                "config": "model = \"gpt-5.5\"\nmodel_provider = \"aprov\"\n\n[model_providers.aprov]\nname = \"A Prov\"\nbase_url = \"https://a.example/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        provider_a.meta = Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("a".to_string(), provider_a);
+        let mut provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-b" },
+                "config": "model = \"gpt-5.5\"\nmodel_provider = \"bprov\"\n\n[model_providers.bprov]\nname = \"B Prov\"\nbase_url = \"https://b.example/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        provider_b.meta = Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("b".to_string(), provider_b);
+    }
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+    state
+        .db
+        .set_config_snippet(
+            AppType::Codex.as_str(),
+            Some("[tui]\nnotifications = true\n".to_string()),
+        )
+        .expect("seed codex common config snippet");
+    let before = codex_live_file_bytes();
+
+    ProviderService::switch(&state, AppType::Codex, "b").expect("switch should succeed");
+
+    // RouteOnly 不把用户 live 中的新增键回填到账号通用配置。
+    let snippet = state
+        .db
+        .get_config_snippet(AppType::Codex.as_str())
+        .expect("read snippet")
+        .expect("snippet present");
+    assert!(
+        !snippet.contains("disable_response_storage"),
+        "route-only switch must not capture live keys, got: {snippet}"
+    );
+    assert!(
+        snippet.contains("notifications = true"),
+        "stored common config should remain unchanged, got: {snippet}"
+    );
+    assert_codex_live_files_unchanged(&before);
+
+    // A 的数据库配置也不能被不相关的 live 内容回填污染。
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers after switch");
+    let stored_a = providers.get("a").expect("provider a exists");
+    let stored_a_config = stored_a
+        .settings_config
+        .get("config")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        stored_a_config.contains("model_provider = \"aprov\""),
+        "provider-owned routing must remain unchanged, got: {stored_a_config}"
+    );
+    for forbidden in [
+        "disable_response_storage",
+        "notifications",
+        "mcp_servers",
+        "experimental_bearer_token",
+        "ghost-legacy",
+    ] {
+        assert!(
+            !stored_a_config.contains(forbidden),
+            "'{forbidden}' must not be imported from live in route-only mode, got: {stored_a_config}"
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("b")
+    );
+}
+
+/// RouteOnly 不以用户自主管理的 live 文件为数据库通用配置的事实来源；
+/// live 中的删除不会隐式改写数据库片段，也不会触发目标账号 live 写入。
+#[test]
+fn switch_codex_route_only_does_not_apply_common_config_deletions_from_live() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    // 片段里有两个共享键，但用户已在 live 里删掉 disable_response_storage
+    let live_config = r#"model_provider = "aprov"
+
+[tui]
+notifications = true
+
+[model_providers.aprov]
+name = "A Prov"
+base_url = "https://a.example/v1"
+wire_api = "responses"
+"#;
+    seed_codex_live_files(&json!({ "OPENAI_API_KEY": "sk-a" }), live_config);
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "a".to_string();
+        for (id, name, prov_key) in [("a", "A", "aprov"), ("b", "B", "bprov")] {
+            let mut provider = Provider::with_id(
+                id.to_string(),
+                name.to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": format!("sk-{id}") },
+                    "config": format!("model_provider = \"{prov_key}\"\n\n[model_providers.{prov_key}]\nname = \"{name} Prov\"\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"responses\"\n")
+                }),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                common_config_enabled: Some(true),
+                ..Default::default()
+            });
+            manager.providers.insert(id.to_string(), provider);
+        }
+    }
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+    state
+        .db
+        .set_config_snippet(
+            AppType::Codex.as_str(),
+            Some("disable_response_storage = true\n\n[tui]\nnotifications = true\n".to_string()),
+        )
+        .expect("seed codex common config snippet");
+    let before = codex_live_file_bytes();
+
+    ProviderService::switch(&state, AppType::Codex, "b").expect("switch should succeed");
+
+    let snippet = state
+        .db
+        .get_config_snippet(AppType::Codex.as_str())
+        .expect("read snippet")
+        .expect("snippet present");
+    assert!(
+        snippet.contains("disable_response_storage = true"),
+        "route-only switch must not rewrite the stored snippet, got: {snippet}"
+    );
+    assert!(
+        snippet.contains("notifications = true"),
+        "kept shared key should remain in the snippet, got: {snippet}"
+    );
+    assert_codex_live_files_unchanged(&before);
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read current provider")
+            .as_deref(),
+        Some("b")
     );
 }
 

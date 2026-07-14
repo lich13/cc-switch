@@ -88,6 +88,15 @@ pub async fn dispatch(
             let app = app_type(arg(&args, "app")?)?;
             to_value(ProviderService::import_default_config(state, app)?)?
         }
+        "ensure_codex_official_provider" => to_value(
+            state
+                .db
+                .ensure_official_seed_by_id(
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                    AppType::Codex,
+                )
+                .map_err(|e| e.to_string())?,
+        )?,
         "get_universal_providers" => to_value(ProviderService::list_universal(state)?)?,
         "get_universal_provider" => {
             let id: String = arg(&args, "id")?;
@@ -133,10 +142,6 @@ pub async fn dispatch(
         "get_optimizer_config" => to_value(state.db.get_optimizer_config()?)?,
         "set_optimizer_config" => {
             let config: crate::proxy::types::OptimizerConfig = arg(&args, "config")?;
-            match config.cache_ttl.as_str() {
-                "5m" | "1h" => {}
-                other => return Err(format!("Invalid cache_ttl value: '{other}'")),
-            }
             state.db.set_optimizer_config(&config)?;
             json!(true)
         }
@@ -147,6 +152,19 @@ pub async fn dispatch(
         "get_app_config_path" => to_value(crate::config::get_app_config_path().to_string_lossy())?,
         "get_claude_code_config_path" => {
             to_value(crate::config::get_claude_settings_path().to_string_lossy())?
+        }
+        "update_toml_common_config_snippet" => {
+            let config_toml: String = arg(&args, "configToml")?;
+            let snippet_toml: String = arg(&args, "snippetToml")?;
+            let enabled: bool = arg(&args, "enabled")?;
+            to_value(
+                crate::services::provider::update_toml_common_config_snippet(
+                    &config_toml,
+                    &snippet_toml,
+                    enabled,
+                )
+                .map_err(|e| e.to_string())?,
+            )?
         }
         "get_app_config_dir_override" => Value::Null,
         "set_app_config_dir_override" => json!(false),
@@ -163,6 +181,12 @@ pub async fn dispatch(
         | "open_zip_file_dialog"
         | "open_provider_terminal"
         | "launch_session_terminal"
+        | "list_profiles"
+        | "create_profile"
+        | "update_profile"
+        | "delete_profile"
+        | "apply_profile"
+        | "clear_current_profile"
         | "open_external" => reject_desktop_command(command)?,
         "copy_text_to_clipboard" => json!(true),
         "get_migration_result" | "get_skills_migration_result" => Value::Null,
@@ -1215,6 +1239,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn optimizer_commands_accept_the_v317_config_shape() {
+        let (_dir, state) = temp_state();
+        let config = json!({
+            "enabled": true,
+            "thinkingOptimizer": false,
+            "cacheInjection": true
+        });
+
+        let saved = dispatch(
+            &state,
+            "set_optimizer_config",
+            json!({ "config": config }),
+            false,
+        )
+        .await
+        .expect("save v3.17 optimizer config");
+        assert_eq!(saved, json!(true));
+
+        let loaded = dispatch(&state, "get_optimizer_config", json!({}), false)
+            .await
+            .expect("load v3.17 optimizer config");
+        assert_eq!(
+            loaded,
+            json!({
+                "enabled": true,
+                "thinkingOptimizer": false,
+                "cacheInjection": true
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn web_rpc_rejects_unknown_and_desktop_only_commands() {
         let (_dir, state) = temp_state();
 
@@ -1232,6 +1288,79 @@ mod tests {
         .await
         .expect_err("desktop command");
         assert!(desktop.contains("桌面专属命令"));
+    }
+
+    #[tokio::test]
+    async fn ensure_codex_official_provider_is_available_to_web_rpc() {
+        let (_dir, state) = temp_state();
+
+        let inserted = dispatch(&state, "ensure_codex_official_provider", json!({}), false)
+            .await
+            .expect("ensure Codex official provider");
+        assert_eq!(inserted, json!(true));
+
+        let provider = state
+            .db
+            .get_provider_by_id(
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                AppType::Codex.as_str(),
+            )
+            .expect("query Codex official provider")
+            .expect("Codex official provider exists");
+        assert_eq!(provider.category.as_deref(), Some("official"));
+
+        let repeated = dispatch(&state, "ensure_codex_official_provider", json!({}), false)
+            .await
+            .expect("ensure existing Codex official provider");
+        assert_eq!(repeated, json!(false));
+    }
+
+    #[tokio::test]
+    async fn update_toml_common_config_snippet_is_available_and_redacts_secrets() {
+        let (_dir, state) = temp_state();
+
+        let updated = dispatch(
+            &state,
+            "update_toml_common_config_snippet",
+            json!({
+                "configToml": "# keep this comment\nmodel = \"gpt-5.6\"\nexperimental_bearer_token = \"sk-web-secret\"\n",
+                "snippetToml": "[tui]\nnotifications = false\n",
+                "enabled": true
+            }),
+            false,
+        )
+        .await
+        .expect("merge Codex common config snippet");
+
+        let updated = updated.as_str().expect("updated TOML string");
+        assert!(updated.contains("# keep this comment"));
+        assert!(updated.contains("model = \"gpt-5.6\""));
+        assert!(updated.contains("[tui]"));
+        assert!(updated.contains("notifications = false"));
+        assert!(!updated.contains("sk-web-secret"));
+        assert!(updated.contains(SECRET_CONFIGURED_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    async fn project_profile_commands_remain_desktop_only() {
+        let (_dir, state) = temp_state();
+
+        for command in [
+            "list_profiles",
+            "create_profile",
+            "update_profile",
+            "delete_profile",
+            "apply_profile",
+            "clear_current_profile",
+        ] {
+            let err = dispatch(&state, command, json!({}), false)
+                .await
+                .expect_err("Project Profiles must not be available to WebUI");
+            assert!(
+                err.contains("桌面专属命令"),
+                "{command} should be explicitly desktop-only, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]

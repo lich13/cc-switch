@@ -1,5 +1,7 @@
 import { useTranslation } from "react-i18next";
+import { FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ToggleRow } from "@/components/ui/toggle-row";
 import { cn } from "@/lib/utils";
 import { isWebRuntime } from "@/lib/runtime";
 import { ProviderIcon } from "@/components/ProviderIcon";
@@ -37,6 +39,7 @@ export function AppVisibilitySettings({
   onChange,
 }: AppVisibilitySettingsProps) {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
 
   const visibleApps: VisibleApps = settings.visibleApps ?? {
     claude: true,
@@ -47,7 +50,7 @@ export function AppVisibilitySettings({
     openclaw: true,
     hermes: true,
   };
-  const visibleAppOptions = isWebRuntime()
+  const visibleAppOptions = isWeb
     ? APP_CONFIG.filter((app) => WEB_APP_IDS.has(app.id))
     : APP_CONFIG;
 
@@ -99,6 +102,17 @@ export function AppVisibilitySettings({
           );
         })}
       </div>
+      {!isWeb && (
+        <ToggleRow
+          icon={<FolderOpen className="h-4 w-4 text-emerald-500" />}
+          title={t("settings.appVisibility.showProfileSwitcher")}
+          description={t(
+            "settings.appVisibility.showProfileSwitcherDescription",
+          )}
+          checked={settings.showProfileSwitcher ?? true}
+          onCheckedChange={(value) => onChange({ showProfileSwitcher: value })}
+        />
+      )}
     </section>
   );
 }

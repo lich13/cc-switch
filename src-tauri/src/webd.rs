@@ -845,6 +845,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v317_rpc_commands_keep_web_security_boundaries() {
+        let (_dir, app) = test_router();
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/admin/rpc/ensure_codex_official_provider",
+                json!({}),
+            ))
+            .await
+            .expect("unauthenticated v3.17 RPC");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/auth/login",
+                json!({ "username": "admin", "password": "very-secure-password" }),
+            ))
+            .await
+            .expect("login");
+        let (status, headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = session_cookie(&headers);
+        let csrf = body
+            .get("csrfToken")
+            .and_then(Value::as_str)
+            .expect("login csrf")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/update_toml_common_config_snippet",
+                json!({
+                    "configToml": "model = \"gpt-5.6\"\n",
+                    "snippetToml": "[tui]\nnotifications = false\n",
+                    "enabled": true
+                }),
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .expect("v3.17 RPC without CSRF");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/ensure_codex_official_provider",
+                json!({}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("ensure Codex official provider");
+        let (status, _headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.get("data"), Some(&Value::Bool(true)));
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/update_toml_common_config_snippet",
+                json!({
+                    "configToml": "experimental_bearer_token = \"sk-http-secret\"\n",
+                    "snippetToml": "[tui]\nnotifications = false\n",
+                    "enabled": true
+                }),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("update TOML common config snippet");
+        let (status, _headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let updated = body
+            .get("data")
+            .and_then(Value::as_str)
+            .expect("updated TOML response");
+        assert!(updated.contains("[tui]"));
+        assert!(updated.contains("secret_configured"));
+        assert!(!updated.contains("sk-http-secret"));
+
+        let response = app
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/list_profiles",
+                json!({}),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("Project Profiles RPC");
+        let (status, _headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body
+            .get("error")
+            .and_then(Value::as_str)
+            .expect("Project Profiles rejection")
+            .contains("桌面专属命令"));
+    }
+
+    #[tokio::test]
     async fn providers_export_import_endpoints_require_auth_and_csrf() {
         let (_dir, app, db) = test_router_with_db(|_| {});
         let provider = Provider::with_id(

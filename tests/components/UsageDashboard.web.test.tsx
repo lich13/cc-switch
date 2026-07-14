@@ -68,6 +68,9 @@ describe("UsageDashboard web runtime", () => {
 
     expect(screen.getByTestId("usage-hero")).toBeInTheDocument();
     expect(screen.queryByTestId("usage-trend-chart")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "usage.appFilter.opencode" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the usage trend chart in desktop runtime", () => {
@@ -76,5 +79,8 @@ describe("UsageDashboard web runtime", () => {
     renderUsageDashboard();
 
     expect(screen.getByTestId("usage-trend-chart")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "usage.appFilter.opencode" }),
+    ).toBeInTheDocument();
   });
 });

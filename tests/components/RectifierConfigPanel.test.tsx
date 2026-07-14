@@ -44,7 +44,6 @@ function mockPanelConfig(
     enabled: false,
     thinkingOptimizer: true,
     cacheInjection: true,
-    cacheTtl: "1h",
   });
   vi.mocked(settingsApi.getUserAgentRewriteConfig).mockResolvedValue(
     userAgentRewriteConfig,
@@ -113,7 +112,9 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     );
 
     fireEvent.click(
-      screen.getAllByLabelText("settings.advanced.userAgentRewrite.ruleEnabled")[0],
+      screen.getAllByLabelText(
+        "settings.advanced.userAgentRewrite.ruleEnabled",
+      )[0],
     );
     fireEvent.click(
       screen.getByRole("button", {
