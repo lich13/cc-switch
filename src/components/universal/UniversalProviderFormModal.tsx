@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { useTranslation } from "react-i18next";
-import { Eye, EyeOff, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,10 +17,12 @@ import {
   type UniversalProviderPreset,
 } from "@/config/universalProviderPresets";
 import { deepClone } from "@/utils/deepClone";
+import ApiKeyInput from "@/components/providers/forms/ApiKeyInput";
 
 interface UniversalProviderFormModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onExitComplete?: () => void;
   onSave: (provider: UniversalProvider) => void;
   onSaveAndSync?: (provider: UniversalProvider) => void;
   editingProvider?: UniversalProvider | null;
@@ -30,6 +32,7 @@ interface UniversalProviderFormModalProps {
 export function UniversalProviderFormModal({
   isOpen,
   onClose,
+  onExitComplete,
   onSave,
   onSaveAndSync,
   editingProvider,
@@ -45,7 +48,6 @@ export function UniversalProviderFormModal({
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [showApiKey, setShowApiKey] = useState(false);
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [notes, setNotes] = useState("");
 
@@ -319,6 +321,13 @@ requires_openai_auth = true`;
     onClose();
   }, [pendingProvider, onSaveAndSync, onClose]);
 
+  const handleExitComplete = useCallback(() => {
+    setApiKey("");
+    setPendingProvider(null);
+    setSyncConfirmOpen(false);
+    onExitComplete?.();
+  }, [onExitComplete]);
+
   const footer = (
     <>
       <Button variant="outline" onClick={onClose}>
@@ -352,6 +361,7 @@ requires_openai_auth = true`;
           : t("universalProvider.add", { defaultValue: "添加统一供应商" })
       }
       onClose={onClose}
+      onExitComplete={handleExitComplete}
       footer={footer}
     >
       <div className="space-y-6">
@@ -420,34 +430,13 @@ requires_openai_auth = true`;
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="apiKey">
-              {t("universalProvider.apiKey", { defaultValue: "API Key" })}
-            </Label>
-            <div className="relative">
-              <Input
-                id="apiKey"
-                type={showApiKey ? "text" : "password"}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-..."
-                className="pr-10"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute right-0 top-0 h-full px-3"
-                onClick={() => setShowApiKey(!showApiKey)}
-              >
-                {showApiKey ? (
-                  <EyeOff className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-          </div>
+          <ApiKeyInput
+            id="apiKey"
+            value={apiKey}
+            onChange={setApiKey}
+            label={t("universalProvider.apiKey", { defaultValue: "API Key" })}
+            placeholder="sk-..."
+          />
 
           <div className="space-y-2">
             <Label htmlFor="websiteUrl">

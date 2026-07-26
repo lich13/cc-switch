@@ -35,6 +35,7 @@ mod tests;
 // DAO 类型导出供外部使用
 pub(crate) use dao::providers_seed::{
     is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, CODEX_OFFICIAL_PROVIDER_ID,
+    GROKBUILD_OFFICIAL_PROVIDER_ID,
 };
 pub(crate) use dao::proxy::{
     validate_cost_multiplier, validate_pricing_source, PRICING_SOURCE_REQUEST,
@@ -55,7 +56,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 13;
+pub(crate) const SCHEMA_VERSION: i32 = 16;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -107,8 +108,20 @@ impl Database {
 
     /// 初始化指定路径的数据库连接并创建表
     ///
-    /// 无头服务使用此入口，避免云机进程误写桌面用户目录。
+    /// 桌面端与测试使用此入口，并保留官方的用量明细汇总策略。
     pub fn init_at(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        Self::init_at_with_usage_pruning(path, true)
+    }
+
+    /// 初始化 webd 数据库，保留全部代理请求明细。
+    pub fn init_at_for_webd(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        Self::init_at_with_usage_pruning(path, false)
+    }
+
+    fn init_at_with_usage_pruning(
+        path: impl AsRef<Path>,
+        prune_usage_details: bool,
+    ) -> Result<Self, AppError> {
         let db_path = path.as_ref().to_path_buf();
         let db_exists = db_path.exists();
 
@@ -161,8 +174,12 @@ impl Database {
         if let Err(e) = db.cleanup_old_stream_check_logs(7) {
             log::warn!("Startup stream_check_logs cleanup failed: {e}");
         }
-        if let Err(e) = db.rollup_and_prune(30) {
-            log::warn!("Startup rollup_and_prune failed: {e}");
+        if prune_usage_details {
+            if let Err(e) = db.rollup_and_prune(30) {
+                log::warn!("Startup rollup_and_prune failed: {e}");
+            }
+        } else {
+            log::info!("Skipping proxy request detail pruning for webd database");
         }
         // Reclaim disk space after cleanup
         {

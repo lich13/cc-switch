@@ -8,9 +8,12 @@ import { UniversalProviderFormModal } from "./UniversalProviderFormModal";
 import { universalProvidersApi } from "@/lib/api";
 import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 import { deepClone } from "@/utils/deepClone";
+import { extractErrorMessage } from "@/utils/errorUtils";
+import { isWebRuntime } from "@/lib/runtime";
 
 export function UniversalProviderPanel() {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
 
   // 状态
   const [providers, setProviders] = useState<UniversalProvidersMap>({});
@@ -72,7 +75,6 @@ export function UniversalProviderPanel() {
               }),
         );
         loadProviders();
-        setEditingProvider(null);
       } catch (error) {
         console.error("Failed to save universal provider:", error);
         toast.error(
@@ -97,7 +99,6 @@ export function UniversalProviderPanel() {
           }),
         );
         loadProviders();
-        setEditingProvider(null);
       } catch (error) {
         console.error("Failed to save and sync universal provider:", error);
         toast.error(
@@ -197,10 +198,36 @@ export function UniversalProviderPanel() {
   );
 
   // 打开编辑
-  const handleEdit = useCallback((provider: UniversalProvider) => {
-    setEditingProvider(provider);
-    setIsFormOpen(true);
-  }, []);
+  const handleEdit = useCallback(
+    async (provider: UniversalProvider) => {
+      if (!isWeb) {
+        setEditingProvider(provider);
+        setIsFormOpen(true);
+        return;
+      }
+
+      try {
+        const detail = await universalProvidersApi.getForEdit(provider.id);
+        if (!detail) {
+          throw new Error(
+            t("universalProvider.editDetailUnavailable", {
+              defaultValue: "统一供应商编辑详情不可用",
+            }),
+          );
+        }
+        setEditingProvider(detail);
+        setIsFormOpen(true);
+      } catch (error) {
+        const detail =
+          extractErrorMessage(error) ||
+          t("universalProvider.loadError", {
+            defaultValue: "加载统一供应商失败",
+          });
+        toast.error(detail);
+      }
+    },
+    [isWeb, t],
+  );
 
   // 打开删除确认
   const handleDeleteClick = useCallback(
@@ -277,8 +304,8 @@ export function UniversalProviderPanel() {
         isOpen={isFormOpen}
         onClose={() => {
           setIsFormOpen(false);
-          setEditingProvider(null);
         }}
+        onExitComplete={() => setEditingProvider(null)}
         onSave={handleSave}
         onSaveAndSync={handleSaveAndSync}
         editingProvider={editingProvider}

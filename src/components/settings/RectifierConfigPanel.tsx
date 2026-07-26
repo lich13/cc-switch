@@ -17,7 +17,6 @@ import {
 const DEFAULT_USER_AGENT_REWRITE_CONFIG: UserAgentRewriteConfig = {
   enabled: true,
   rules: [{ enabled: true, pattern: "^OpenAI/Python\\s+\\d+(?:\\.\\d+)*$" }],
-  claudeTarget: "claude-cli/2.1.173 (external, cli)",
   codexTarget:
     "codex-tui/0.139.0 (Ubuntu 24.4.0; x86_64) unknown (codex-tui; 0.139.0)",
 };
@@ -28,34 +27,27 @@ function normalizeUserAgentRewriteConfig(
   config: UserAgentRewriteConfig,
 ): UserAgentRewriteConfig {
   return {
-    ...DEFAULT_USER_AGENT_REWRITE_CONFIG,
-    ...config,
-    claudeTarget:
-      typeof config.claudeTarget === "string" &&
-      config.claudeTarget.trim().length > 0
-        ? config.claudeTarget
-        : DEFAULT_USER_AGENT_REWRITE_CONFIG.claudeTarget,
+    enabled:
+      typeof config.enabled === "boolean"
+        ? config.enabled
+        : DEFAULT_USER_AGENT_REWRITE_CONFIG.enabled,
     codexTarget:
       typeof config.codexTarget === "string" &&
       config.codexTarget.trim().length > 0
         ? config.codexTarget
         : DEFAULT_USER_AGENT_REWRITE_CONFIG.codexTarget,
-    rules:
-      Array.isArray(config.rules)
-        ? config.rules.map((rule) => ({
-            enabled: rule.enabled ?? true,
-            pattern: rule.pattern ?? "",
-          }))
-        : DEFAULT_USER_AGENT_REWRITE_CONFIG.rules,
+    rules: Array.isArray(config.rules)
+      ? config.rules.map((rule) => ({
+          enabled: rule.enabled ?? true,
+          pattern: rule.pattern ?? "",
+        }))
+      : DEFAULT_USER_AGENT_REWRITE_CONFIG.rules,
   };
 }
 
 function validateUserAgentRewriteConfig(
   config: UserAgentRewriteConfig,
 ): string | null {
-  if (!config.claudeTarget.trim()) {
-    return "settings.advanced.userAgentRewrite.claudeTargetRequired";
-  }
   if (!config.codexTarget.trim()) {
     return "settings.advanced.userAgentRewrite.codexTargetRequired";
   }
@@ -113,8 +105,7 @@ export function RectifierConfigPanel() {
     settingsApi
       .getUserAgentRewriteConfig()
       .then((nextConfig) => {
-        const normalizedConfig =
-          normalizeUserAgentRewriteConfig(nextConfig);
+        const normalizedConfig = normalizeUserAgentRewriteConfig(nextConfig);
         setUserAgentRewriteConfig(normalizedConfig);
         setSavedUserAgentRewriteConfig(normalizedConfig);
       })
@@ -199,8 +190,7 @@ export function RectifierConfigPanel() {
 
   const handleUserAgentRewriteSave = async () => {
     const newConfig: UserAgentRewriteConfig = {
-      ...userAgentRewriteConfig,
-      claudeTarget: userAgentRewriteConfig.claudeTarget.trim(),
+      enabled: userAgentRewriteConfig.enabled,
       codexTarget: userAgentRewriteConfig.codexTarget.trim(),
       rules: userAgentRewriteConfig.rules
         .map((rule) => ({
@@ -341,37 +331,20 @@ export function RectifierConfigPanel() {
           </div>
 
           <div className="space-y-4 pl-4">
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="user-agent-rewrite-claude-target">
-                  {t("settings.advanced.userAgentRewrite.claudeTarget")}
-                </Label>
-                <Input
-                  id="user-agent-rewrite-claude-target"
-                  value={userAgentRewriteConfig.claudeTarget}
-                  disabled={!userAgentRewriteConfig.enabled}
-                  onChange={(event) =>
-                    updateUserAgentRewriteConfig({
-                      claudeTarget: event.target.value,
-                    })
-                  }
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="user-agent-rewrite-codex-target">
-                  {t("settings.advanced.userAgentRewrite.codexTarget")}
-                </Label>
-                <Input
-                  id="user-agent-rewrite-codex-target"
-                  value={userAgentRewriteConfig.codexTarget}
-                  disabled={!userAgentRewriteConfig.enabled}
-                  onChange={(event) =>
-                    updateUserAgentRewriteConfig({
-                      codexTarget: event.target.value,
-                    })
-                  }
-                />
-              </div>
+            <div className="space-y-2">
+              <Label htmlFor="user-agent-rewrite-codex-target">
+                {t("settings.advanced.userAgentRewrite.codexTarget")}
+              </Label>
+              <Input
+                id="user-agent-rewrite-codex-target"
+                value={userAgentRewriteConfig.codexTarget}
+                disabled={!userAgentRewriteConfig.enabled}
+                onChange={(event) =>
+                  updateUserAgentRewriteConfig({
+                    codexTarget: event.target.value,
+                  })
+                }
+              />
             </div>
 
             <div className="space-y-2">

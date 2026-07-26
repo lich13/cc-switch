@@ -18,6 +18,13 @@ import {
   listen,
   showMessage,
 } from "@/lib/runtime";
+import { FrontendErrorBoundary } from "./components/FrontendErrorBoundary";
+import {
+  installGlobalErrorHandlers,
+  reportFrontendError,
+} from "./lib/frontendLogger";
+
+installGlobalErrorHandlers();
 
 // 根据平台添加 body class，便于平台特定样式
 try {
@@ -74,7 +81,7 @@ try {
   });
 } catch (e) {
   // 忽略事件订阅异常（例如在非 Tauri 环境下）
-  console.error("订阅 configLoadError 事件失败", e);
+  reportFrontendError("config_load_error_listener", e);
 }
 
 async function bootstrap() {
@@ -88,10 +95,12 @@ async function bootstrap() {
         // 数据库版本过新：渲染应用内「升级应用」恢复界面，不进入正常 App
         ReactDOM.createRoot(document.getElementById("root")!).render(
           <React.StrictMode>
-            <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
-              <DatabaseUpgrade payload={initError} />
-              <Toaster />
-            </ThemeProvider>
+            <FrontendErrorBoundary>
+              <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
+                <DatabaseUpgrade payload={initError} />
+                <Toaster />
+              </ThemeProvider>
+            </FrontendErrorBoundary>
           </React.StrictMode>,
         );
         return;
@@ -103,22 +112,24 @@ async function bootstrap() {
       }
     } catch (e) {
       // 忽略拉取错误，继续渲染
-      console.error("拉取初始化错误失败", e);
+      reportFrontendError("get_init_error", e);
     }
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
-          <UpdateProvider>
-            <WebAuthGate>
-              <App />
-            </WebAuthGate>
-            <Toaster />
-          </UpdateProvider>
-        </ThemeProvider>
-      </QueryClientProvider>
+      <FrontendErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
+            <UpdateProvider>
+              <WebAuthGate>
+                <App />
+              </WebAuthGate>
+              <Toaster />
+            </UpdateProvider>
+          </ThemeProvider>
+        </QueryClientProvider>
+      </FrontendErrorBoundary>
     </React.StrictMode>,
   );
 }

@@ -559,9 +559,7 @@ export interface UserAgentRewriteRule {
 export interface UserAgentRewriteConfig {
   enabled: boolean;
   rules: UserAgentRewriteRule[];
-  claudeTarget: string;
   codexTarget: string;
-  [key: string]: unknown;
 }
 
 export interface LogConfig {

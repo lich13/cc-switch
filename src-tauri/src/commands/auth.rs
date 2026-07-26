@@ -2,13 +2,18 @@ use tauri::State;
 
 use crate::commands::codex_oauth::CodexOAuthState;
 use crate::commands::copilot::CopilotAuthState;
+use crate::commands::xai_oauth::XaiOAuthState;
+use crate::managed_auth::ManagedAuthManagers;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::proxy::providers::copilot_auth::{
     CopilotAuthError, GitHubAccount, GitHubDeviceCodeResponse,
 };
+use crate::proxy::providers::xai_oauth_auth::{XaiOAuthAccount, XaiOAuthError};
 
 const AUTH_PROVIDER_GITHUB_COPILOT: &str = "github_copilot";
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
+const AUTH_PROVIDER_XAI_OAUTH: &str = "xai_oauth";
+const XAI_OAUTH_WEB_ERROR: &str = "WebUI 不允许查看或修改 xAI OAuth 账号";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ManagedAuthAccount {
@@ -19,6 +24,7 @@ pub struct ManagedAuthAccount {
     pub authenticated_at: i64,
     pub is_default: bool,
     pub github_domain: String,
+    pub requires_reauth: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,6 +50,7 @@ fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_GITHUB_COPILOT => Ok(AUTH_PROVIDER_GITHUB_COPILOT),
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
+        AUTH_PROVIDER_XAI_OAUTH => Ok(AUTH_PROVIDER_XAI_OAUTH),
         _ => Err(format!("Unsupported auth provider: {auth_provider}")),
     }
 }
@@ -61,6 +68,23 @@ fn map_account(
         avatar_url: account.avatar_url,
         authenticated_at: account.authenticated_at,
         github_domain: account.github_domain,
+        requires_reauth: false,
+    }
+}
+
+fn map_xai_account(
+    account: XaiOAuthAccount,
+    default_account_id: Option<&str>,
+) -> ManagedAuthAccount {
+    ManagedAuthAccount {
+        is_default: default_account_id == Some(account.id.as_str()),
+        id: account.id,
+        provider: AUTH_PROVIDER_XAI_OAUTH.to_string(),
+        login: account.login,
+        avatar_url: account.avatar_url,
+        authenticated_at: account.authenticated_at,
+        github_domain: account.github_domain,
+        requires_reauth: account.requires_reauth,
     }
 }
 
@@ -78,12 +102,225 @@ fn map_device_code_response(
     }
 }
 
+fn ensure_web_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
+    match auth_provider {
+        AUTH_PROVIDER_GITHUB_COPILOT => Ok(AUTH_PROVIDER_GITHUB_COPILOT),
+        AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
+        AUTH_PROVIDER_XAI_OAUTH => Err(XAI_OAUTH_WEB_ERROR.to_string()),
+        _ => Err(format!("Unsupported auth provider: {auth_provider}")),
+    }
+}
+
+impl ManagedAuthManagers {
+    pub(crate) async fn web_start_login(
+        &self,
+        auth_provider: &str,
+        github_domain: Option<&str>,
+    ) -> Result<ManagedAuthDeviceCodeResponse, String> {
+        let auth_provider = ensure_web_auth_provider(auth_provider)?;
+        let response = match auth_provider {
+            AUTH_PROVIDER_GITHUB_COPILOT => self
+                .copilot
+                .read()
+                .await
+                .start_device_flow(github_domain)
+                .await
+                .map_err(|e| e.to_string())?,
+            AUTH_PROVIDER_CODEX_OAUTH => self
+                .codex_oauth
+                .read()
+                .await
+                .start_device_flow()
+                .await
+                .map_err(|e| e.to_string())?,
+            _ => unreachable!(),
+        };
+        Ok(map_device_code_response(auth_provider, response))
+    }
+
+    pub(crate) async fn web_poll_for_account(
+        &self,
+        auth_provider: &str,
+        device_code: &str,
+        github_domain: Option<&str>,
+    ) -> Result<Option<ManagedAuthAccount>, String> {
+        let auth_provider = ensure_web_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                let auth_manager = self.copilot.write().await;
+                match auth_manager
+                    .poll_for_token(device_code, github_domain)
+                    .await
+                {
+                    Ok(account) => {
+                        let default_account_id = auth_manager.get_status().await.default_account_id;
+                        Ok(account.map(|account| {
+                            map_account(auth_provider, account, default_account_id.as_deref())
+                        }))
+                    }
+                    Err(CopilotAuthError::AuthorizationPending) => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            AUTH_PROVIDER_CODEX_OAUTH => {
+                let auth_manager = self.codex_oauth.write().await;
+                match auth_manager.poll_for_token(device_code).await {
+                    Ok(account) => {
+                        let default_account_id = auth_manager.get_status().await.default_account_id;
+                        Ok(account.map(|account| {
+                            map_account(auth_provider, account, default_account_id.as_deref())
+                        }))
+                    }
+                    Err(CodexOAuthError::AuthorizationPending) => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) async fn web_list_accounts(
+        &self,
+        auth_provider: &str,
+    ) -> Result<Vec<ManagedAuthAccount>, String> {
+        let auth_provider = ensure_web_auth_provider(auth_provider)?;
+        let (accounts, default_account_id) = match auth_provider {
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                let status = self.copilot.read().await.get_status().await;
+                (status.accounts, status.default_account_id)
+            }
+            AUTH_PROVIDER_CODEX_OAUTH => {
+                let status = self.codex_oauth.read().await.get_status().await;
+                (status.accounts, status.default_account_id)
+            }
+            _ => unreachable!(),
+        };
+        Ok(accounts
+            .into_iter()
+            .map(|account| map_account(auth_provider, account, default_account_id.as_deref()))
+            .collect())
+    }
+
+    pub(crate) async fn web_get_status(
+        &self,
+        auth_provider: &str,
+    ) -> Result<ManagedAuthStatus, String> {
+        let auth_provider = ensure_web_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                let status = self.copilot.read().await.get_status().await;
+                let default_account_id = status.default_account_id.clone();
+                Ok(ManagedAuthStatus {
+                    provider: auth_provider.to_string(),
+                    authenticated: status.authenticated,
+                    default_account_id: default_account_id.clone(),
+                    migration_error: status.migration_error,
+                    accounts: status
+                        .accounts
+                        .into_iter()
+                        .map(|account| {
+                            map_account(auth_provider, account, default_account_id.as_deref())
+                        })
+                        .collect(),
+                })
+            }
+            AUTH_PROVIDER_CODEX_OAUTH => {
+                let status = self.codex_oauth.read().await.get_status().await;
+                let default_account_id = status.default_account_id.clone();
+                Ok(ManagedAuthStatus {
+                    provider: auth_provider.to_string(),
+                    authenticated: status.authenticated,
+                    default_account_id: default_account_id.clone(),
+                    migration_error: None,
+                    accounts: status
+                        .accounts
+                        .into_iter()
+                        .map(|account| {
+                            map_account(auth_provider, account, default_account_id.as_deref())
+                        })
+                        .collect(),
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) async fn web_remove_account(
+        &self,
+        auth_provider: &str,
+        account_id: &str,
+    ) -> Result<(), String> {
+        match ensure_web_auth_provider(auth_provider)? {
+            AUTH_PROVIDER_GITHUB_COPILOT => self
+                .copilot
+                .write()
+                .await
+                .remove_account(account_id)
+                .await
+                .map_err(|e| e.to_string()),
+            AUTH_PROVIDER_CODEX_OAUTH => self
+                .codex_oauth
+                .write()
+                .await
+                .remove_account(account_id)
+                .await
+                .map_err(|e| e.to_string()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) async fn web_set_default_account(
+        &self,
+        auth_provider: &str,
+        account_id: &str,
+    ) -> Result<(), String> {
+        match ensure_web_auth_provider(auth_provider)? {
+            AUTH_PROVIDER_GITHUB_COPILOT => self
+                .copilot
+                .write()
+                .await
+                .set_default_account(account_id)
+                .await
+                .map_err(|e| e.to_string()),
+            AUTH_PROVIDER_CODEX_OAUTH => self
+                .codex_oauth
+                .write()
+                .await
+                .set_default_account(account_id)
+                .await
+                .map_err(|e| e.to_string()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) async fn web_logout(&self, auth_provider: &str) -> Result<(), String> {
+        match ensure_web_auth_provider(auth_provider)? {
+            AUTH_PROVIDER_GITHUB_COPILOT => self
+                .copilot
+                .write()
+                .await
+                .clear_auth()
+                .await
+                .map_err(|e| e.to_string()),
+            AUTH_PROVIDER_CODEX_OAUTH => self
+                .codex_oauth
+                .write()
+                .await
+                .clear_auth()
+                .await
+                .map_err(|e| e.to_string()),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn auth_start_login(
     auth_provider: String,
     github_domain: Option<String>,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<ManagedAuthDeviceCodeResponse, String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -103,6 +340,14 @@ pub async fn auth_start_login(
                 .map_err(|e| e.to_string())?;
             Ok(map_device_code_response(auth_provider, response))
         }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.read().await;
+            let response = auth_manager
+                .start_device_flow()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(map_device_code_response(auth_provider, response))
+        }
         _ => unreachable!(),
     }
 }
@@ -114,6 +359,7 @@ pub async fn auth_poll_for_account(
     github_domain: Option<String>,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<Option<ManagedAuthAccount>, String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -146,6 +392,18 @@ pub async fn auth_poll_for_account(
                 Err(e) => Err(e.to_string()),
             }
         }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.write().await;
+            match auth_manager.poll_for_token(&device_code).await {
+                Ok(account) => {
+                    let default_account_id = auth_manager.get_status().await.default_account_id;
+                    Ok(account
+                        .map(|account| map_xai_account(account, default_account_id.as_deref())))
+                }
+                Err(XaiOAuthError::AuthorizationPending) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -155,6 +413,7 @@ pub async fn auth_list_accounts(
     auth_provider: String,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<Vec<ManagedAuthAccount>, String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -178,6 +437,16 @@ pub async fn auth_list_accounts(
                 .map(|account| map_account(auth_provider, account, default_account_id.as_deref()))
                 .collect())
         }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.read().await;
+            let status = auth_manager.get_status().await;
+            let default_account_id = status.default_account_id.clone();
+            Ok(status
+                .accounts
+                .into_iter()
+                .map(|account| map_xai_account(account, default_account_id.as_deref()))
+                .collect())
+        }
         _ => unreachable!(),
     }
 }
@@ -187,6 +456,7 @@ pub async fn auth_get_status(
     auth_provider: String,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<ManagedAuthStatus, String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -226,6 +496,22 @@ pub async fn auth_get_status(
                     .collect(),
             })
         }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.read().await;
+            let status = auth_manager.get_status().await;
+            let default_account_id = status.default_account_id.clone();
+            Ok(ManagedAuthStatus {
+                provider: auth_provider.to_string(),
+                authenticated: status.authenticated,
+                default_account_id: default_account_id.clone(),
+                migration_error: None,
+                accounts: status
+                    .accounts
+                    .into_iter()
+                    .map(|account| map_xai_account(account, default_account_id.as_deref()))
+                    .collect(),
+            })
+        }
         _ => unreachable!(),
     }
 }
@@ -236,6 +522,7 @@ pub async fn auth_remove_account(
     account_id: String,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<(), String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -248,6 +535,13 @@ pub async fn auth_remove_account(
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = codex_state.0.write().await;
+            auth_manager
+                .remove_account(&account_id)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.write().await;
             auth_manager
                 .remove_account(&account_id)
                 .await
@@ -263,6 +557,7 @@ pub async fn auth_set_default_account(
     account_id: String,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<(), String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -275,6 +570,13 @@ pub async fn auth_set_default_account(
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = codex_state.0.write().await;
+            auth_manager
+                .set_default_account(&account_id)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.write().await;
             auth_manager
                 .set_default_account(&account_id)
                 .await
@@ -289,6 +591,7 @@ pub async fn auth_logout(
     auth_provider: String,
     copilot_state: State<'_, CopilotAuthState>,
     codex_state: State<'_, CodexOAuthState>,
+    xai_state: State<'_, XaiOAuthState>,
 ) -> Result<(), String> {
     let auth_provider = ensure_auth_provider(&auth_provider)?;
     match auth_provider {
@@ -298,6 +601,10 @@ pub async fn auth_logout(
         }
         AUTH_PROVIDER_CODEX_OAUTH => {
             let auth_manager = codex_state.0.write().await;
+            auth_manager.clear_auth().await.map_err(|e| e.to_string())
+        }
+        AUTH_PROVIDER_XAI_OAUTH => {
+            let auth_manager = xai_state.0.write().await;
             auth_manager.clear_auth().await.map_err(|e| e.to_string())
         }
         _ => unreachable!(),

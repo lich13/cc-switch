@@ -331,35 +331,46 @@ async fn rpc(
 ) -> Response {
     let auth = match web_auth::require_auth(&state.app_state.db, &headers) {
         Ok(auth) => auth,
-        Err(status) => return web_auth::json_error(status, "认证失败"),
+        Err(status) => return private_no_store(web_auth::json_error(status, "认证失败")),
     };
     if let Err(status) = web_auth::require_csrf(&headers, &auth) {
-        return web_auth::json_error(status, "CSRF 校验失败");
+        return private_no_store(web_auth::json_error(status, "CSRF 校验失败"));
     }
 
-    match crate::web_rpc::dispatch(&state.app_state, &command, args, state.config.production).await
-    {
-        Ok(data) => {
-            let _ = web_auth::record_audit(
-                &state.app_state.db,
-                Some(&auth.admin_id),
-                "rpc",
-                Some(&command),
-                json!({ "username": auth.username }),
-            );
-            Json(json!({ "data": data })).into_response()
-        }
-        Err(err) => {
-            let _ = web_auth::record_audit(
-                &state.app_state.db,
-                Some(&auth.admin_id),
-                "rpc.failed",
-                Some(&command),
-                json!({ "username": auth.username, "error": err }),
-            );
-            web_auth::json_error(StatusCode::BAD_REQUEST, err)
-        }
-    }
+    let response =
+        match crate::web_rpc::dispatch(&state.app_state, &command, args, state.config.production)
+            .await
+        {
+            Ok(data) => {
+                let _ = web_auth::record_audit(
+                    &state.app_state.db,
+                    Some(&auth.admin_id),
+                    "rpc",
+                    Some(&command),
+                    json!({ "username": auth.username }),
+                );
+                Json(json!({ "data": data })).into_response()
+            }
+            Err(err) => {
+                let _ = web_auth::record_audit(
+                    &state.app_state.db,
+                    Some(&auth.admin_id),
+                    "rpc.failed",
+                    Some(&command),
+                    json!({ "username": auth.username, "error": err }),
+                );
+                web_auth::json_error(StatusCode::BAD_REQUEST, err)
+            }
+        };
+    private_no_store(response)
+}
+
+fn private_no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response
 }
 
 async fn export_providers(State(state): State<WebdState>, headers: HeaderMap) -> Response {
@@ -845,6 +856,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_edit_rpcs_require_auth_csrf_and_disable_caching() {
+        let (_dir, app, db) = test_router_with_db(|_| {});
+        let provider = Provider::with_id(
+            "http-edit".to_string(),
+            "HTTP Edit".to_string(),
+            json!({
+                "apiKey": "http-form-key",
+                "access_token": "http-oauth-secret"
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+        db.save_universal_provider(&crate::provider::UniversalProvider::new(
+            "http-universal".to_string(),
+            "HTTP Universal".to_string(),
+            "custom".to_string(),
+            "https://api.example.com".to_string(),
+            "http-universal-key".to_string(),
+        ))
+        .expect("save universal provider");
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/admin/rpc/get_provider_for_edit",
+                json!({ "app": "claude", "id": "http-edit" }),
+            ))
+            .await
+            .expect("unauthenticated edit RPC");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/auth/login",
+                json!({ "username": "admin", "password": "very-secure-password" }),
+            ))
+            .await
+            .expect("login");
+        let (status, headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = session_cookie(&headers);
+        let csrf = body
+            .get("csrfToken")
+            .and_then(Value::as_str)
+            .expect("login csrf")
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/get_provider_for_edit",
+                json!({ "app": "claude", "id": "http-edit" }),
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .expect("edit RPC without CSRF");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/get_provider_for_edit",
+                json!({ "app": "claude", "id": "missing" }),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("missing provider edit RPC");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/get_provider_for_edit",
+                json!({ "app": "claude", "id": "http-edit" }),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("provider edit RPC");
+        let (status, headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+        assert_eq!(
+            body.pointer("/data/settingsConfig/apiKey")
+                .and_then(Value::as_str),
+            Some("http-form-key")
+        );
+        assert_eq!(
+            body.pointer("/data/settingsConfig/access_token")
+                .and_then(Value::as_str),
+            Some("secret_configured")
+        );
+
+        let response = app
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/rpc/get_universal_provider_for_edit",
+                json!({ "id": "http-universal" }),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("universal provider edit RPC");
+        let (status, headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+        assert_eq!(
+            body.pointer("/data/apiKey").and_then(Value::as_str),
+            Some("http-universal-key")
+        );
+    }
+
+    #[tokio::test]
     async fn v317_rpc_commands_keep_web_security_boundaries() {
         let (_dir, app) = test_router();
 
@@ -1238,7 +1402,7 @@ mod tests {
         assert!(candidates.iter().all(|candidate| {
             candidate.get("apiKey").is_none()
                 && candidate.get("api_key").is_none()
-                && candidate.to_string().contains("key") == false
+                && !candidate.to_string().contains("key")
         }));
 
         let response = app

@@ -71,6 +71,10 @@ impl Provider {
         self.provider_type() == Some("codex_oauth")
     }
 
+    pub fn is_xai_oauth(&self) -> bool {
+        self.provider_type() == Some("xai_oauth")
+    }
+
     pub fn is_github_copilot(&self) -> bool {
         self.provider_type() == Some("github_copilot")
             || self.claude_base_url_contains("githubcopilot.com")
@@ -79,6 +83,7 @@ impl Provider {
     pub fn uses_managed_account_auth(&self) -> bool {
         self.is_github_copilot()
             || self.is_codex_oauth()
+            || self.is_xai_oauth()
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
@@ -110,38 +115,10 @@ impl Provider {
     }
 
     pub fn supports_image_generation_policy(&self, app_type: &crate::app_config::AppType) -> bool {
-        if self.category.as_deref() == Some("official")
-            || self.is_codex_oauth()
-            || self.is_github_copilot()
-        {
-            return false;
-        }
-
-        match app_type {
-            crate::app_config::AppType::Codex => true,
-            crate::app_config::AppType::ClaudeDesktop
-                if self
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.claude_desktop_mode.as_ref())
-                    != Some(&ClaudeDesktopMode::Proxy) =>
-            {
-                false
-            }
-            crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
-                matches!(
-                    self.meta
-                        .as_ref()
-                        .and_then(|meta| meta.api_format.as_deref())
-                        .or_else(|| self
-                            .settings_config
-                            .get("api_format")
-                            .and_then(|v| v.as_str())),
-                    Some("openai_chat" | "openai_responses")
-                )
-            }
-            _ => false,
-        }
+        matches!(app_type, crate::app_config::AppType::Codex)
+            && self.category.as_deref() != Some("official")
+            && !self.is_codex_oauth()
+            && !self.is_github_copilot()
     }
 
     /// Resolve `(base_url, api_key)` for usage queries (native balance /
@@ -199,6 +176,11 @@ impl Provider {
                 let api_key = first_non_empty(env, &["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
                 (base_url, api_key)
             }
+            AppType::GrokBuild => settings
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(crate::grok_config::extract_credentials)
+                .unwrap_or_default(),
             // Hermes (config.yaml) flattens credentials at the top level, snake_case.
             AppType::Hermes => (
                 str_at(settings.get("base_url")),
@@ -1072,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_supports_image_generation_policy_only_for_routed_chat_providers() {
+    fn provider_supports_image_generation_policy_only_for_codex() {
         use crate::app_config::AppType;
 
         let mut codex = Provider::with_id(
@@ -1082,47 +1064,32 @@ mod tests {
             None,
         );
         codex.category = Some("custom".to_string());
+        codex.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            ..ProviderMeta::default()
+        });
         assert!(codex.supports_image_generation_policy(&AppType::Codex));
 
         let mut official = codex.clone();
         official.category = Some("official".to_string());
         assert!(!official.supports_image_generation_policy(&AppType::Codex));
 
-        let mut claude = Provider::with_id(
-            "claude-openai".to_string(),
-            "Claude OpenAI".to_string(),
-            json!({}),
-            None,
-        );
-        claude.category = Some("custom".to_string());
-        claude.meta = Some(ProviderMeta {
-            api_format: Some("openai_responses".to_string()),
-            ..ProviderMeta::default()
-        });
-        assert!(claude.supports_image_generation_policy(&AppType::Claude));
-
-        let mut native = claude.clone();
-        native.meta = Some(ProviderMeta {
-            api_format: Some("anthropic".to_string()),
-            ..ProviderMeta::default()
-        });
-        assert!(!native.supports_image_generation_policy(&AppType::Claude));
-
-        let mut desktop_direct = claude.clone();
-        desktop_direct.meta = Some(ProviderMeta {
-            api_format: Some("openai_responses".to_string()),
-            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
-            ..ProviderMeta::default()
-        });
-        assert!(!desktop_direct.supports_image_generation_policy(&AppType::ClaudeDesktop));
-
-        let mut desktop_proxy = desktop_direct.clone();
-        desktop_proxy.meta = Some(ProviderMeta {
-            api_format: Some("openai_responses".to_string()),
-            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
-            ..ProviderMeta::default()
-        });
-        assert!(desktop_proxy.supports_image_generation_policy(&AppType::ClaudeDesktop));
+        for app in [
+            AppType::Claude,
+            AppType::ClaudeDesktop,
+            AppType::Gemini,
+            AppType::GrokBuild,
+            AppType::OpenCode,
+            AppType::OpenClaw,
+            AppType::Hermes,
+        ] {
+            assert!(
+                !codex.supports_image_generation_policy(&app),
+                "image generation policy must be disabled for {}",
+                app.as_str()
+            );
+        }
     }
 
     #[test]

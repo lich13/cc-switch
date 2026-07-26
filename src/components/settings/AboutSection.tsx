@@ -63,6 +63,7 @@ const TOOL_NAMES = [
   "claude",
   "codex",
   "gemini",
+  "grok",
   "opencode",
   "openclaw",
   "hermes",
@@ -130,6 +131,8 @@ ${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthro
 npm i -g @openai/codex@latest
 # Gemini CLI
 npm i -g @google/gemini-cli@latest
+# Grok Build
+npm i -g @xai-official/grok@latest
 # OpenCode
 ${posixScriptInstallCommand("https://opencode.ai/install")} || npm i -g opencode-ai@latest
 # OpenClaw
@@ -143,6 +146,8 @@ npm i -g @anthropic-ai/claude-code@latest
 npm i -g @openai/codex@latest
 # Gemini CLI
 npm i -g @google/gemini-cli@latest
+# Grok Build
+npm i -g @xai-official/grok@latest
 # OpenCode
 npm i -g opencode-ai@latest
 # OpenClaw
@@ -158,6 +163,7 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   claude: "Claude Code",
   codex: "Codex",
   gemini: "Gemini CLI",
+  grok: "Grok Build",
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
@@ -173,6 +179,7 @@ const TOOL_APP_IDS: Record<ToolName, AppId> = {
   claude: "claude",
   codex: "codex",
   gemini: "gemini",
+  grok: "grokbuild",
   opencode: "opencode",
   openclaw: "openclaw",
   hermes: "hermes",
@@ -1025,215 +1032,229 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             </div>
 
             <div className="grid gap-3 px-1 sm:grid-cols-2 xl:grid-cols-3">
-          {TOOL_NAMES.map((toolName, index) => {
-            const tool = toolVersionByName.get(toolName);
-            const appConfig = APP_ICON_MAP[TOOL_APP_IDS[toolName]];
-            const displayName = TOOL_DISPLAY_NAMES[toolName];
-            // 单卡片 loading 用「结果是否已到」而非「整批是否结束」驱动，实现渐进式刷新：
-            //   - loadingTools[t]：本工具探测在途（首次加载或单工具刷新）；
-            //   - isLoadingTools && !has(t)：整批进行中且该工具尚未返回——覆盖首帧/刷新时
-            //     未完成卡片的 loading 外观。某工具结果一落进 toolVersions，has(t) 即为 true，
-            //     该卡片立刻脱离 loading（哪怕全局 isLoadingTools 还为 true），其它卡片不受影响。
-            const isToolVersionLoading =
-              Boolean(loadingTools[toolName]) ||
-              (isLoadingTools && !toolVersionByName.has(toolName));
-            const isOutdated = isUpdateAvailable(
-              tool?.version,
-              tool?.latest_version,
-            );
-            // 已安装却跑不起来（如 Node 版本不达标）：用它区分卡片文案与按钮，避免把
-            // "装了跑不起来"误判成"未安装"而给出无用的安装按钮（重装同一版本解决不了）。
-            const installedButBroken = Boolean(tool?.installed_but_broken);
-            // loading 和 broken 都没有可执行动作；其余按是否已装/是否过期选择。
-            const action: ToolLifecycleAction | null =
-              isToolVersionLoading || installedButBroken
-                ? null
-                : !tool?.version
-                  ? "install"
-                  : isOutdated
-                    ? "update"
-                    : null;
-            const runningAction = toolActions[toolName];
-            const title = tool?.version || tool?.error || t("common.unknown");
-            const conflicts = toolDiagnostics[toolName];
+              {TOOL_NAMES.map((toolName, index) => {
+                const tool = toolVersionByName.get(toolName);
+                const appConfig = APP_ICON_MAP[TOOL_APP_IDS[toolName]];
+                const displayName = TOOL_DISPLAY_NAMES[toolName];
+                // 单卡片 loading 用「结果是否已到」而非「整批是否结束」驱动，实现渐进式刷新：
+                //   - loadingTools[t]：本工具探测在途（首次加载或单工具刷新）；
+                //   - isLoadingTools && !has(t)：整批进行中且该工具尚未返回——覆盖首帧/刷新时
+                //     未完成卡片的 loading 外观。某工具结果一落进 toolVersions，has(t) 即为 true，
+                //     该卡片立刻脱离 loading（哪怕全局 isLoadingTools 还为 true），其它卡片不受影响。
+                const isToolVersionLoading =
+                  Boolean(loadingTools[toolName]) ||
+                  (isLoadingTools && !toolVersionByName.has(toolName));
+                const isOutdated = isUpdateAvailable(
+                  tool?.version,
+                  tool?.latest_version,
+                );
+                // 已安装却跑不起来（如 Node 版本不达标）：用它区分卡片文案与按钮，避免把
+                // "装了跑不起来"误判成"未安装"而给出无用的安装按钮（重装同一版本解决不了）。
+                const installedButBroken = Boolean(tool?.installed_but_broken);
+                // loading 和 broken 都没有可执行动作；其余按是否已装/是否过期选择。
+                const action: ToolLifecycleAction | null =
+                  isToolVersionLoading || installedButBroken
+                    ? null
+                    : !tool?.version
+                      ? "install"
+                      : isOutdated
+                        ? "update"
+                        : null;
+                const runningAction = toolActions[toolName];
+                const title =
+                  tool?.version || tool?.error || t("common.unknown");
+                const conflicts = toolDiagnostics[toolName];
 
-            return (
-              <motion.div
-                key={toolName}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.15 + index * 0.04 }}
-                className="flex min-h-[150px] flex-col gap-3 rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 shadow-sm transition-colors hover:border-primary/30"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground">
-                      {appConfig?.icon ?? <Terminal className="h-4 w-4" />}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {displayName}
+                return (
+                  <motion.div
+                    key={toolName}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: 0.15 + index * 0.04 }}
+                    className="flex min-h-[150px] flex-col gap-3 rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 shadow-sm transition-colors hover:border-primary/30"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground">
+                          {appConfig?.icon ?? <Terminal className="h-4 w-4" />}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">
+                            {displayName}
+                          </div>
+                          {tool?.env_type &&
+                            ENV_BADGE_CONFIG[tool.env_type] && (
+                              <span
+                                className={`mt-1 inline-flex w-fit text-[9px] px-1.5 py-0.5 rounded-full border ${ENV_BADGE_CONFIG[tool.env_type].className}`}
+                              >
+                                {t(ENV_BADGE_CONFIG[tool.env_type].labelKey)}
+                                {tool.wsl_distro ? ` · ${tool.wsl_distro}` : ""}
+                              </span>
+                            )}
+                        </div>
                       </div>
-                      {tool?.env_type && ENV_BADGE_CONFIG[tool.env_type] && (
+                      {isToolVersionLoading ? (
+                        <Loader2 className="mt-1 h-4 w-4 animate-spin text-muted-foreground" />
+                      ) : tool?.version ? (
+                        isOutdated ? (
+                          <span className="mt-1 shrink-0 rounded-full border border-yellow-500/20 bg-yellow-500/10 px-1.5 py-0.5 text-[10px] text-yellow-600 dark:text-yellow-400">
+                            {t("settings.updateAvailableShort")}
+                          </span>
+                        ) : (
+                          <CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-green-500" />
+                        )
+                      ) : (
+                        <AlertCircle className="mt-1 h-4 w-4 shrink-0 text-yellow-500" />
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">
+                          {t("settings.currentVersion")}
+                        </span>
                         <span
-                          className={`mt-1 inline-flex w-fit text-[9px] px-1.5 py-0.5 rounded-full border ${ENV_BADGE_CONFIG[tool.env_type].className}`}
+                          className="min-w-0 truncate font-mono text-foreground"
+                          title={title}
                         >
-                          {t(ENV_BADGE_CONFIG[tool.env_type].labelKey)}
-                          {tool.wsl_distro ? ` · ${tool.wsl_distro}` : ""}
+                          {isToolVersionLoading
+                            ? t("common.loading")
+                            : tool?.version
+                              ? tool.version
+                              : installedButBroken
+                                ? t("settings.installedNotRunnable")
+                                : t("common.notInstalled")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">
+                          {t("settings.latestVersion")}
+                        </span>
+                        <span className="min-w-0 truncate font-mono text-foreground">
+                          {isToolVersionLoading
+                            ? t("common.loading")
+                            : tool?.latest_version || t("common.unknown")}
+                        </span>
+                      </div>
+                      {!isToolVersionLoading &&
+                        !tool?.version &&
+                        tool?.error && (
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {tool.error}
+                          </div>
+                        )}
+                    </div>
+
+                    {tool?.env_type === "wsl" && (
+                      <div className="flex flex-wrap gap-2">
+                        <Select
+                          value={wslShellByTool[toolName]?.wslShell || "auto"}
+                          onValueChange={(v) =>
+                            handleToolShellChange(toolName, v)
+                          }
+                          disabled={isToolVersionLoading || isAnyBusy}
+                        >
+                          <SelectTrigger className="h-7 w-[82px] text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">
+                              {t("common.auto")}
+                            </SelectItem>
+                            {WSL_SHELL_OPTIONS.map((shell) => (
+                              <SelectItem key={shell} value={shell}>
+                                {shell}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Select
+                          value={
+                            wslShellByTool[toolName]?.wslShellFlag || "auto"
+                          }
+                          onValueChange={(v) =>
+                            handleToolShellFlagChange(toolName, v)
+                          }
+                          disabled={isToolVersionLoading || isAnyBusy}
+                        >
+                          <SelectTrigger className="h-7 w-[82px] text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">
+                              {t("common.auto")}
+                            </SelectItem>
+                            {WSL_SHELL_FLAG_OPTIONS.map((flag) => (
+                              <SelectItem key={flag} value={flag}>
+                                {flag}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    {/* 多处安装冲突诊断结果：仅在懒触发后有数据时渲染。 */}
+                    {conflicts && conflicts.length > 0 && (
+                      <div className="space-y-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-2.5">
+                        <div className="text-[11px] font-medium text-yellow-600 dark:text-yellow-400">
+                          {t("settings.toolConflictTitle")}
+                        </div>
+                        <p className="text-[10px] leading-snug text-muted-foreground">
+                          {t("settings.toolConflictHint")}
+                        </p>
+                        <ul className="space-y-1.5">
+                          {conflicts.map((inst) => (
+                            <li key={inst.path}>
+                              <ToolInstallRow inst={inst} />
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div className="mt-auto flex items-center justify-end">
+                      {isToolVersionLoading ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t("common.loading")}
+                        </span>
+                      ) : installedButBroken ? (
+                        // 已安装但跑不起来：重装无济于事，不给按钮，给一句指向环境的提示。
+                        <span className="text-xs text-yellow-600 dark:text-yellow-400">
+                          {t("settings.toolCheckEnv")}
+                        </span>
+                      ) : action ? (
+                        <Button
+                          size="sm"
+                          variant={action === "install" ? "outline" : "default"}
+                          className="h-7 gap-1.5 text-xs"
+                          onClick={() =>
+                            handleRunToolAction([toolName], action)
+                          }
+                          disabled={isToolVersionLoading || isAnyBusy}
+                        >
+                          {runningAction ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : action === "install" ? (
+                            <Download className="h-3.5 w-3.5" />
+                          ) : (
+                            <ArrowUpCircle className="h-3.5 w-3.5" />
+                          )}
+                          {/* loading 时文案保持不变、仅图标切换为 spinner，
+                          按钮宽度恒定，避免"升级"→"升级中…"导致的抖动。 */}
+                          {action === "install"
+                            ? t("settings.toolInstall")
+                            : t("settings.toolUpdate")}
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          {t("settings.toolReady")}
                         </span>
                       )}
                     </div>
-                  </div>
-                  {isToolVersionLoading ? (
-                    <Loader2 className="mt-1 h-4 w-4 animate-spin text-muted-foreground" />
-                  ) : tool?.version ? (
-                    isOutdated ? (
-                      <span className="mt-1 shrink-0 rounded-full border border-yellow-500/20 bg-yellow-500/10 px-1.5 py-0.5 text-[10px] text-yellow-600 dark:text-yellow-400">
-                        {t("settings.updateAvailableShort")}
-                      </span>
-                    ) : (
-                      <CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-green-500" />
-                    )
-                  ) : (
-                    <AlertCircle className="mt-1 h-4 w-4 shrink-0 text-yellow-500" />
-                  )}
-                </div>
-
-                <div className="space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {t("settings.currentVersion")}
-                    </span>
-                    <span
-                      className="min-w-0 truncate font-mono text-foreground"
-                      title={title}
-                    >
-                      {isToolVersionLoading
-                        ? t("common.loading")
-                        : tool?.version
-                          ? tool.version
-                          : installedButBroken
-                            ? t("settings.installedNotRunnable")
-                            : t("common.notInstalled")}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {t("settings.latestVersion")}
-                    </span>
-                    <span className="min-w-0 truncate font-mono text-foreground">
-                      {isToolVersionLoading
-                        ? t("common.loading")
-                        : tool?.latest_version || t("common.unknown")}
-                    </span>
-                  </div>
-                  {!isToolVersionLoading && !tool?.version && tool?.error && (
-                    <div className="truncate text-[11px] text-muted-foreground">
-                      {tool.error}
-                    </div>
-                  )}
-                </div>
-
-                {tool?.env_type === "wsl" && (
-                  <div className="flex flex-wrap gap-2">
-                    <Select
-                      value={wslShellByTool[toolName]?.wslShell || "auto"}
-                      onValueChange={(v) => handleToolShellChange(toolName, v)}
-                      disabled={isToolVersionLoading || isAnyBusy}
-                    >
-                      <SelectTrigger className="h-7 w-[82px] text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="auto">{t("common.auto")}</SelectItem>
-                        {WSL_SHELL_OPTIONS.map((shell) => (
-                          <SelectItem key={shell} value={shell}>
-                            {shell}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Select
-                      value={wslShellByTool[toolName]?.wslShellFlag || "auto"}
-                      onValueChange={(v) =>
-                        handleToolShellFlagChange(toolName, v)
-                      }
-                      disabled={isToolVersionLoading || isAnyBusy}
-                    >
-                      <SelectTrigger className="h-7 w-[82px] text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="auto">{t("common.auto")}</SelectItem>
-                        {WSL_SHELL_FLAG_OPTIONS.map((flag) => (
-                          <SelectItem key={flag} value={flag}>
-                            {flag}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-
-                {/* 多处安装冲突诊断结果：仅在懒触发后有数据时渲染。 */}
-                {conflicts && conflicts.length > 0 && (
-                  <div className="space-y-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-2.5">
-                    <div className="text-[11px] font-medium text-yellow-600 dark:text-yellow-400">
-                      {t("settings.toolConflictTitle")}
-                    </div>
-                    <p className="text-[10px] leading-snug text-muted-foreground">
-                      {t("settings.toolConflictHint")}
-                    </p>
-                    <ul className="space-y-1.5">
-                      {conflicts.map((inst) => (
-                        <li key={inst.path}>
-                          <ToolInstallRow inst={inst} />
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                <div className="mt-auto flex items-center justify-end">
-                  {isToolVersionLoading ? (
-                    <span className="text-xs text-muted-foreground">
-                      {t("common.loading")}
-                    </span>
-                  ) : installedButBroken ? (
-                    // 已安装但跑不起来：重装无济于事，不给按钮，给一句指向环境的提示。
-                    <span className="text-xs text-yellow-600 dark:text-yellow-400">
-                      {t("settings.toolCheckEnv")}
-                    </span>
-                  ) : action ? (
-                    <Button
-                      size="sm"
-                      variant={action === "install" ? "outline" : "default"}
-                      className="h-7 gap-1.5 text-xs"
-                      onClick={() => handleRunToolAction([toolName], action)}
-                      disabled={isToolVersionLoading || isAnyBusy}
-                    >
-                      {runningAction ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : action === "install" ? (
-                        <Download className="h-3.5 w-3.5" />
-                      ) : (
-                        <ArrowUpCircle className="h-3.5 w-3.5" />
-                      )}
-                      {/* loading 时文案保持不变、仅图标切换为 spinner，
-                          按钮宽度恒定，避免"升级"→"升级中…"导致的抖动。 */}
-                      {action === "install"
-                        ? t("settings.toolInstall")
-                        : t("settings.toolUpdate")}
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">
-                      {t("settings.toolReady")}
-                    </span>
-                  )}
-                </div>
-              </motion.div>
-            );
-          })}
+                  </motion.div>
+                );
+              })}
             </div>
           </div>
 

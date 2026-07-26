@@ -98,6 +98,7 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { DEFAULT_VISIBLE_APPS } from "@/config/appConfig";
 
 type View =
   | "providers"
@@ -130,11 +131,12 @@ const VALID_APPS: AppId[] = [
   "claude-desktop",
   "codex",
   "gemini",
+  "grokbuild",
   "opencode",
   "openclaw",
   "hermes",
 ];
-const WEB_SAFE_APPS: AppId[] = ["claude", "codex", "gemini"];
+const WEB_SAFE_APPS: AppId[] = ["claude", "codex", "gemini", "grokbuild"];
 
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
@@ -142,7 +144,7 @@ const getInitialApp = (): AppId => {
   if (saved && validApps.includes(saved)) {
     return saved;
   }
-  return "claude";
+  return "codex";
 };
 
 const VIEW_STORAGE_KEY = "cc-switch-last-view";
@@ -183,6 +185,7 @@ function App() {
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isEditOpen, setIsEditOpen] = useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
@@ -204,15 +207,8 @@ function App() {
       ? 32
       : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
-  const configuredVisibleApps: VisibleApps = settingsData?.visibleApps ?? {
-    claude: true,
-    "claude-desktop": true,
-    codex: true,
-    gemini: true,
-    opencode: true,
-    openclaw: true,
-    hermes: true,
-  };
+  const configuredVisibleApps: VisibleApps =
+    settingsData?.visibleApps ?? DEFAULT_VISIBLE_APPS;
   const visibleApps: VisibleApps = isWeb
     ? {
         ...configuredVisibleApps,
@@ -224,21 +220,23 @@ function App() {
     : configuredVisibleApps;
 
   const getFirstVisibleApp = (): AppId => {
-    if (visibleApps.claude) return "claude";
     if (visibleApps.codex) return "codex";
+    if (visibleApps.grokbuild) return "grokbuild";
+    if (visibleApps.claude) return "claude";
     if (visibleApps.gemini) return "gemini";
     if (visibleApps["claude-desktop"]) return "claude-desktop";
     if (visibleApps.opencode) return "opencode";
     if (visibleApps.openclaw) return "openclaw";
     if (visibleApps.hermes) return "hermes";
-    return "claude"; // fallback
+    return "codex";
   };
 
   useEffect(() => {
+    if (!settingsData) return;
     if (!visibleApps[activeApp]) {
       setActiveApp(getFirstVisibleApp());
     }
-  }, [visibleApps, activeApp]);
+  }, [settingsData, visibleApps, activeApp]);
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
@@ -246,6 +244,7 @@ function App() {
       currentView === "sessions" &&
       sharedFeatureApp !== "claude" &&
       sharedFeatureApp !== "codex" &&
+      sharedFeatureApp !== "grokbuild" &&
       sharedFeatureApp !== "opencode" &&
       sharedFeatureApp !== "openclaw" &&
       sharedFeatureApp !== "gemini" &&
@@ -280,7 +279,6 @@ function App() {
   const [envConflicts, setEnvConflicts] = useState<EnvConflict[]>([]);
   const [showEnvBanner, setShowEnvBanner] = useState(false);
 
-  const effectiveEditingProvider = useLastValidValue(editingProvider);
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -331,6 +329,7 @@ function App() {
   const hasSessionSupport =
     sharedFeatureApp === "claude" ||
     sharedFeatureApp === "codex" ||
+    sharedFeatureApp === "grokbuild" ||
     sharedFeatureApp === "opencode" ||
     sharedFeatureApp === "openclaw" ||
     sharedFeatureApp === "gemini" ||
@@ -685,7 +684,34 @@ function App() {
     originalId?: string;
   }) => {
     await updateProvider(provider, originalId);
-    setEditingProvider(null);
+  };
+
+  const handleOpenProviderEditor = async (provider: Provider) => {
+    if (!isWeb) {
+      setEditingProvider(provider);
+      setIsEditOpen(true);
+      return;
+    }
+
+    try {
+      const detail = await providersApi.getForEdit(provider.id, activeApp);
+      if (!detail) {
+        throw new Error(
+          t("provider.editDetailUnavailable", {
+            defaultValue: "供应商编辑详情不可用",
+          }),
+        );
+      }
+      setEditingProvider(detail);
+      setIsEditOpen(true);
+    } catch (error) {
+      const detail =
+        extractErrorMessage(error) ||
+        t("provider.editDetailLoadFailed", {
+          defaultValue: "加载供应商编辑详情失败",
+        });
+      toast.error(detail);
+    }
   };
 
   const handleToggleImageGenerationPolicy = async (
@@ -1050,9 +1076,9 @@ function App() {
                       }
                       activeProviderId={activeProviderId}
                       onSwitch={switchProvider}
-                      onEdit={(provider) => {
-                        setEditingProvider(provider);
-                      }}
+                      onEdit={(provider) =>
+                        void handleOpenProviderEditor(provider)
+                      }
                       onDelete={(provider) =>
                         setConfirmAction({ provider, action: "delete" })
                       }
@@ -1492,7 +1518,9 @@ function App() {
                               ? "openclaw"
                               : activeApp === "hermes"
                                 ? "hermes"
-                                : "default"
+                                : activeApp === "grokbuild"
+                                  ? "grokbuild"
+                                  : "default"
                           }
                           className="flex items-center gap-1"
                           initial={{ opacity: 0 }}
@@ -1710,13 +1738,14 @@ function App() {
       />
 
       <EditProviderDialog
-        open={Boolean(editingProvider)}
-        provider={effectiveEditingProvider}
+        open={isEditOpen}
+        provider={editingProvider}
         onOpenChange={(open) => {
           if (!open) {
-            setEditingProvider(null);
+            setIsEditOpen(false);
           }
         }}
+        onExitComplete={() => setEditingProvider(null)}
         onSubmit={handleEditProvider}
         appId={activeApp}
         isProxyTakeover={isCurrentAppTakeoverActive}

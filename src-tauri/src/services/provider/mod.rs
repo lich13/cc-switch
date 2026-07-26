@@ -2266,7 +2266,8 @@ impl ProviderService {
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
 
         if let Some(existing) = existing_provider.as_ref() {
-            if !provider_id_changed
+            if matches!(app_type, AppType::Codex)
+                && !provider_id_changed
                 && Self::is_image_generation_policy_only_update(existing, &provider)
             {
                 state.db.save_provider(app_type.as_str(), &provider)?;
@@ -2653,14 +2654,16 @@ impl ProviderService {
         // restore backup. Serialize them per app, then decide from the locked
         // current state so a just-started takeover cannot be overwritten by a
         // normal live write.
-        let _switch_guard =
-            if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
-                Some(futures::executor::block_on(
-                    state.proxy_service.lock_switch_for_app(app_type.as_str()),
-                ))
-            } else {
-                None
-            };
+        let _switch_guard = if matches!(
+            app_type,
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+        ) {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
 
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the
@@ -2731,15 +2734,12 @@ impl ProviderService {
     ) -> Result<SwitchResult, AppError> {
         Self::validate_provider_settings(&AppType::Codex, provider)?;
 
-        crate::settings::set_current_provider(&AppType::Codex, Some(id))?;
-        state.db.set_current_provider(AppType::Codex.as_str(), id)?;
-
         futures::executor::block_on(
             state
                 .proxy_service
-                .sync_codex_live_from_provider_while_proxy_active(provider),
+                .hot_switch_provider_inner(AppType::Codex.as_str(), id),
         )
-        .map_err(|e| AppError::Message(format!("更新 Codex 本地路由失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("切换 Codex 本地路由失败: {e}")))?;
 
         Ok(SwitchResult::default())
     }
@@ -3151,6 +3151,7 @@ impl ProviderService {
             AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
+            AppType::GrokBuild => Ok(String::new()),
             AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
@@ -3167,6 +3168,7 @@ impl ProviderService {
             AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
+            AppType::GrokBuild => Ok(String::new()),
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
             AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
@@ -3637,6 +3639,32 @@ impl ProviderService {
                 use crate::gemini_config::validate_gemini_settings;
                 validate_gemini_settings(&provider.settings_config)?
             }
+            AppType::GrokBuild => {
+                let settings = provider.settings_config.as_object().ok_or_else(|| {
+                    AppError::localized(
+                        "provider.grokbuild.settings.not_object",
+                        "Grok Build 配置必须是 JSON 对象",
+                        "Grok Build configuration must be a JSON object",
+                    )
+                })?;
+                let config = settings
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.grokbuild.config.missing",
+                            "Grok Build 配置缺少 config 字段",
+                            "Grok Build configuration is missing the config field",
+                        )
+                    })?;
+                if provider.category.as_deref() == Some("official") {
+                    // 官方条目走 Grok CLI 自带 OAuth：空 config 合法，
+                    // 回填快照只要求 TOML 语法合法。
+                    crate::grok_config::validate_config_toml_syntax(config)?;
+                } else {
+                    crate::grok_config::validate_config_toml(config)?;
+                }
+            }
             AppType::OpenCode => {
                 // OpenCode uses a different config structure: { npm, options, models }
                 // Basic validation - must be an object
@@ -3731,6 +3759,28 @@ impl ProviderService {
                     })?
                     .to_string();
 
+                Ok((api_key, base_url))
+            }
+            AppType::GrokBuild => {
+                let config_toml = provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.grokbuild.config.missing",
+                            "Grok Build 配置缺少 config 字段",
+                            "Grok Build configuration is missing the config field",
+                        )
+                    })?;
+                let (base_url, api_key) = crate::grok_config::extract_credentials(config_toml)
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.grokbuild.credentials.missing",
+                            "Grok Build 配置缺少 Base URL 或 API Key",
+                            "Grok Build configuration is missing the base URL or API key",
+                        )
+                    })?;
                 Ok((api_key, base_url))
             }
             AppType::ClaudeDesktop => {

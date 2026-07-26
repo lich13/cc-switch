@@ -114,81 +114,28 @@ describe("ProviderCard image generation policy", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("uses settingsConfig api_format fallback for Claude routable providers", () => {
-    renderCard(
-      {
-        ...baseProvider,
-        settingsConfig: {
-          env: {
-            ANTHROPIC_AUTH_TOKEN: "sk-test",
-            ANTHROPIC_BASE_URL: "https://api.example.com",
-          },
-          api_format: "openai_chat",
-        },
-        meta: {},
-      },
-      vi.fn(),
-      "claude",
-    );
-
-    expect(
-      screen.getByRole("switch", {
-        name: "provider.disableImageGenerationInChat",
-      }),
-    ).toBeInTheDocument();
-  });
-
-  it("does not render for Claude Desktop direct mode providers", () => {
-    renderCard(
-      {
-        ...baseProvider,
-        settingsConfig: {
-          env: {
-            ANTHROPIC_AUTH_TOKEN: "sk-test",
-            ANTHROPIC_BASE_URL: "https://api.example.com",
+  it.each(["claude", "claude-desktop", "gemini"] as AppId[])(
+    "does not render the Codex-only policy in %s",
+    (appId) => {
+      renderCard(
+        {
+          ...baseProvider,
+          meta: {
+            apiFormat: "openai_responses",
+            claudeDesktopMode: "proxy",
           },
         },
-        meta: {
-          apiFormat: "openai_responses",
-          claudeDesktopMode: "direct",
-        },
-      },
-      vi.fn(),
-      "claude-desktop",
-    );
+        vi.fn(),
+        appId,
+      );
 
-    expect(
-      screen.queryByRole("switch", {
-        name: "provider.disableImageGenerationInChat",
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("renders for Claude Desktop proxy mode providers", () => {
-    renderCard(
-      {
-        ...baseProvider,
-        settingsConfig: {
-          env: {
-            ANTHROPIC_AUTH_TOKEN: "sk-test",
-            ANTHROPIC_BASE_URL: "https://api.example.com",
-          },
-        },
-        meta: {
-          apiFormat: "openai_responses",
-          claudeDesktopMode: "proxy",
-        },
-      },
-      vi.fn(),
-      "claude-desktop",
-    );
-
-    expect(
-      screen.getByRole("switch", {
-        name: "provider.disableImageGenerationInChat",
-      }),
-    ).toBeInTheDocument();
-  });
+      expect(
+        screen.queryByRole("switch", {
+          name: "provider.disableImageGenerationInChat",
+        }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("toggles provider meta policy without relying on global settings", () => {
     const { onToggleImageGenerationPolicy } = renderCard(baseProvider);

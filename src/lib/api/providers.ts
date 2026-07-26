@@ -46,6 +46,9 @@ export interface ClaudeDesktopDefaultRoute {
   supports1m: boolean;
 }
 
+export type ProviderEditDetail = Provider;
+export type UniversalProviderEditDetail = UniversalProvider;
+
 export const providersApi = {
   async getAll(appId: AppId): Promise<Record<string, Provider>> {
     return await invoke("get_providers", { app: appId });
@@ -53,6 +56,13 @@ export const providersApi = {
 
   async getCurrent(appId: AppId): Promise<string> {
     return await invoke("get_current_provider", { app: appId });
+  },
+
+  async getForEdit(
+    id: string,
+    appId: AppId,
+  ): Promise<ProviderEditDetail | null> {
+    return await invoke("get_provider_for_edit", { id, app: appId });
   },
 
   async add(
@@ -105,6 +115,10 @@ export const providersApi = {
 
   async ensureCodexOfficialProvider(): Promise<boolean> {
     return await invoke("ensure_codex_official_provider");
+  },
+
+  async ensureGrokBuildOfficialProvider(): Promise<boolean> {
+    return await invoke("ensure_grokbuild_official_provider");
   },
 
   async getClaudeDesktopStatus(): Promise<ClaudeDesktopStatus> {
@@ -219,6 +233,10 @@ export const universalProvidersApi = {
    */
   async get(id: string): Promise<UniversalProvider | null> {
     return await invoke("get_universal_provider", { id });
+  },
+
+  async getForEdit(id: string): Promise<UniversalProviderEditDetail | null> {
+    return await invoke("get_universal_provider_for_edit", { id });
   },
 
   /**

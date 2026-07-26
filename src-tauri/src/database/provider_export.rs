@@ -245,7 +245,7 @@ impl Database {
             .collect();
 
         if matched_keys.len() != selected_keys.len() {
-            for selection in selected_keys.difference(&matched_keys) {
+            if let Some(selection) = selected_keys.difference(&matched_keys).next() {
                 return Err(self.sub2api_selection_error(selection));
             }
         }

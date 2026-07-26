@@ -716,11 +716,7 @@ impl Database {
         }
 
         let mut migrated = Vec::new();
-        for app_type in [
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::ClaudeDesktop,
-            crate::app_config::AppType::Codex,
-        ] {
+        for app_type in [crate::app_config::AppType::Codex] {
             let app_type_str = app_type.as_str();
             let providers = self.get_all_providers(app_type_str)?;
             for mut provider in providers.into_values() {
@@ -883,24 +879,14 @@ mod provider_image_generation_policy_migration_tests {
             .migrate_provider_disable_image_generation_policy(DisableImageGenerationMode::Chat)
             .expect("migrate provider policies");
 
-        assert_eq!(
-            migrated,
-            vec![
-                "claude/claude-openai".to_string(),
-                "claude-desktop/desktop-proxy".to_string(),
-                "codex/codex-custom".to_string()
-            ]
-        );
+        assert_eq!(migrated, vec!["codex/codex-custom".to_string()]);
         assert_eq!(
             provider_policy(&db, AppType::Codex, "codex-custom"),
             Some(DisableImageGenerationMode::Chat)
         );
         assert_eq!(provider_policy(&db, AppType::Codex, "codex-official"), None);
         assert_eq!(provider_policy(&db, AppType::Codex, "codex-copilot"), None);
-        assert_eq!(
-            provider_policy(&db, AppType::Claude, "claude-openai"),
-            Some(DisableImageGenerationMode::Chat)
-        );
+        assert_eq!(provider_policy(&db, AppType::Claude, "claude-openai"), None);
         assert_eq!(
             provider_policy(&db, AppType::Claude, "claude-anthropic"),
             None
@@ -915,7 +901,7 @@ mod provider_image_generation_policy_migration_tests {
         );
         assert_eq!(
             provider_policy(&db, AppType::ClaudeDesktop, "desktop-proxy"),
-            Some(DisableImageGenerationMode::Chat)
+            None
         );
 
         let second = db
@@ -955,6 +941,7 @@ mod ensure_official_seed_tests {
     use crate::app_config::AppType;
     use crate::database::{
         Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, CODEX_OFFICIAL_PROVIDER_ID,
+        GROKBUILD_OFFICIAL_PROVIDER_ID,
     };
 
     #[test]
@@ -1031,6 +1018,26 @@ mod ensure_official_seed_tests {
             .expect("Codex official restored");
         assert_eq!(provider.category.as_deref(), Some("official"));
         assert_eq!(provider.settings_config["auth"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn ensure_recreates_grokbuild_official_seed_after_deletion() {
+        let db = Database::memory().expect("memory db");
+        db.init_default_official_providers().expect("seed");
+        db.delete_provider(AppType::GrokBuild.as_str(), GROKBUILD_OFFICIAL_PROVIDER_ID)
+            .expect("delete Grok Build official");
+
+        let inserted = db
+            .ensure_official_seed_by_id(GROKBUILD_OFFICIAL_PROVIDER_ID, AppType::GrokBuild)
+            .expect("ensure Grok Build official");
+        assert!(inserted);
+        let provider = db
+            .get_provider_by_id(GROKBUILD_OFFICIAL_PROVIDER_ID, AppType::GrokBuild.as_str())
+            .expect("query")
+            .expect("Grok Build official restored");
+        assert_eq!(provider.category.as_deref(), Some("official"));
+        // 空 config：切换时不注入自定义模型表，Grok CLI 回落到自带 OAuth 登录
+        assert_eq!(provider.settings_config["config"], serde_json::json!(""));
     }
 
     #[test]

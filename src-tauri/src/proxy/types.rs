@@ -113,6 +113,7 @@ pub struct ProxyTakeoverStatus {
     pub claude: bool,
     pub codex: bool,
     pub gemini: bool,
+    pub grokbuild: bool,
     pub opencode: bool,
     pub openclaw: bool,
 }
@@ -271,9 +272,6 @@ pub struct UserAgentRewriteConfig {
     /// 匹配规则列表；任一启用规则命中即替换
     #[serde(default = "default_user_agent_rewrite_rules")]
     pub rules: Vec<UserAgentRewriteRule>,
-    /// Claude 请求命中规则后写入的目标 User-Agent。
-    #[serde(default = "default_claude_user_agent_rewrite_target")]
-    pub claude_target: String,
     /// Codex 请求命中规则后写入的目标 User-Agent。
     #[serde(default = "default_codex_user_agent_rewrite_target")]
     pub codex_target: String,
@@ -290,10 +288,6 @@ fn default_user_agent_rewrite_rules() -> Vec<UserAgentRewriteRule> {
     }]
 }
 
-pub fn default_claude_user_agent_rewrite_target() -> String {
-    "claude-cli/2.1.173 (external, cli)".to_string()
-}
-
 pub fn default_codex_user_agent_rewrite_target() -> String {
     "codex-tui/0.139.0 (Ubuntu 24.4.0; x86_64) unknown (codex-tui; 0.139.0)".to_string()
 }
@@ -303,7 +297,6 @@ impl Default for UserAgentRewriteConfig {
         Self {
             enabled: true,
             rules: default_user_agent_rewrite_rules(),
-            claude_target: default_claude_user_agent_rewrite_target(),
             codex_target: default_codex_user_agent_rewrite_target(),
         }
     }
@@ -318,7 +311,6 @@ impl UserAgentRewriteConfig {
             ));
         }
 
-        validate_user_agent_target("Claude", &self.claude_target)?;
         validate_user_agent_target("Codex", &self.codex_target)?;
 
         for rule in &self.rules {
@@ -515,36 +507,31 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.rules.len(), 1);
         assert_eq!(
-            config.claude_target,
-            default_claude_user_agent_rewrite_target()
-        );
-        assert_eq!(
             config.codex_target,
             default_codex_user_agent_rewrite_target()
         );
+        let serialized = serde_json::to_value(&config).expect("serialize rewrite config");
+        assert!(serialized.get("claudeTarget").is_none());
         assert!(config.matches("OpenAI/Python 2.24.0"));
         assert!(config.matches("OpenAI/Python 2.999.10"));
         assert!(!config.matches("curl/8.7.1"));
     }
 
     #[test]
-    fn test_user_agent_rewrite_config_backfills_targets_from_legacy_json() {
+    fn test_user_agent_rewrite_config_ignores_legacy_claude_target() {
         let config: UserAgentRewriteConfig = serde_json::from_value(serde_json::json!({
             "enabled": true,
+            "claudeTarget": "legacy-claude/1.0",
+            "codexTarget": "codex-custom/2.0",
             "rules": [
                 { "enabled": true, "pattern": "^Legacy/.*$" }
             ]
         }))
         .expect("legacy config should deserialize");
 
-        assert_eq!(
-            config.claude_target,
-            default_claude_user_agent_rewrite_target()
-        );
-        assert_eq!(
-            config.codex_target,
-            default_codex_user_agent_rewrite_target()
-        );
+        assert_eq!(config.codex_target, "codex-custom/2.0");
+        let serialized = serde_json::to_value(&config).expect("serialize rewrite config");
+        assert!(serialized.get("claudeTarget").is_none());
         assert!(config.matches("Legacy/1.0"));
     }
 
@@ -577,13 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_agent_rewrite_config_rejects_empty_or_control_target() {
-        let empty_claude = UserAgentRewriteConfig {
-            claude_target: "  ".to_string(),
-            ..UserAgentRewriteConfig::default()
-        };
-        assert!(empty_claude.validate().is_err());
-
+    fn test_user_agent_rewrite_config_rejects_empty_or_control_codex_target() {
         let bad_codex = UserAgentRewriteConfig {
             codex_target: "codex\nbad".to_string(),
             ..UserAgentRewriteConfig::default()

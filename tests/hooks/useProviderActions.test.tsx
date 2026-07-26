@@ -9,6 +9,18 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const toastInfoMock = vi.fn();
 const toastWarningMock = vi.fn();
+const runtimeMocks = vi.hoisted(() => ({
+  isWebRuntime: vi.fn(() => false),
+}));
+
+vi.mock("@/lib/runtime", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/runtime")>("@/lib/runtime");
+  return {
+    ...actual,
+    isWebRuntime: () => runtimeMocks.isWebRuntime(),
+  };
+});
 
 vi.mock("sonner", () => ({
   toast: {
@@ -122,6 +134,9 @@ beforeEach(() => {
   toastErrorMock.mockReset();
   toastInfoMock.mockReset();
   toastWarningMock.mockReset();
+  runtimeMocks.isWebRuntime.mockReset();
+  runtimeMocks.isWebRuntime.mockReturnValue(false);
+  window.localStorage.clear();
 
   addProviderMutation.isPending = false;
   updateProviderMutation.isPending = false;
@@ -174,6 +189,42 @@ describe("useProviderActions", () => {
       originalId: undefined,
     });
     expect(providersApiUpdateTrayMenuMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates directly in web runtime without retaining plaintext in React Query", async () => {
+    runtimeMocks.isWebRuntime.mockReturnValue(true);
+    providersApiUpdateMock.mockResolvedValueOnce(true);
+    providersApiUpdateTrayMenuMock.mockResolvedValueOnce(true);
+    const { wrapper, queryClient } = createWrapper();
+    const provider = createProvider({
+      id: "web-secret-provider",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "sk-web-update-detail" },
+      },
+    });
+
+    const { result } = renderHook(() => useProviderActions("codex"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.updateProvider(provider, "old-provider-id");
+    });
+
+    expect(providersApiUpdateMock).toHaveBeenCalledWith(
+      provider,
+      "codex",
+      "old-provider-id",
+    );
+    expect(updateProviderMutateAsync).not.toHaveBeenCalled();
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+    expect(JSON.stringify(queryClient.getQueryCache().getAll())).not.toContain(
+      "sk-web-update-detail",
+    );
+    expect(JSON.stringify(window.localStorage)).not.toContain(
+      "sk-web-update-detail",
+    );
+    expect(toastSuccessMock).toHaveBeenCalled();
   });
 
   it("should not request plugin sync when switching non-Claude provider", async () => {
@@ -262,6 +313,122 @@ describe("useProviderActions", () => {
       expect.stringContaining("Anthropic Messages"),
     );
     expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+  });
+
+  it("warns for Grok providers that require the Responses router", async () => {
+    switchProviderMutateAsync.mockResolvedValue(undefined);
+    const { wrapper } = createWrapper();
+    const providers = [
+      createProvider({
+        id: "grok-chat",
+        category: "custom",
+        meta: { apiFormat: "openai_chat" },
+      }),
+      createProvider({
+        id: "grok-anthropic",
+        category: "custom",
+        meta: { apiFormat: "anthropic" },
+      }),
+      createProvider({
+        id: "grok-full-url",
+        category: "custom",
+        meta: { isFullUrl: true },
+      }),
+    ];
+
+    const { result } = renderHook(
+      () => useProviderActions("grokbuild", false),
+      { wrapper },
+    );
+
+    for (const provider of providers) {
+      await act(async () => {
+        await result.current.switchProvider(provider);
+      });
+    }
+
+    expect(toastWarningMock).toHaveBeenCalledTimes(3);
+    expect(switchProviderMutateAsync).toHaveBeenCalledTimes(3);
+  });
+
+  it("warns for managed OAuth until the current Code app is taken over", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      category: "custom",
+      meta: {
+        providerType: "codex_oauth",
+        apiFormat: "openai_responses",
+      },
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("codex", true, false),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(toastWarningMock).toHaveBeenCalledWith(
+      expect.stringContaining("托管 OAuth"),
+    );
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+  });
+
+  it("does not warn for managed OAuth after the current Code app is taken over", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      category: "custom",
+      meta: {
+        providerType: "codex_oauth",
+        apiFormat: "openai_responses",
+      },
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("codex", true, true),
+      { wrapper },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(toastWarningMock).not.toHaveBeenCalled();
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+  });
+
+  it("uses proxy process readiness for Claude Desktop routing", async () => {
+    switchProviderMutateAsync.mockResolvedValue(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      category: "custom",
+      meta: { claudeDesktopMode: "proxy" },
+    });
+
+    const { result, rerender } = renderHook(
+      ({ isProxyRunning }) =>
+        useProviderActions("claude-desktop", isProxyRunning, false),
+      { initialProps: { isProxyRunning: true }, wrapper },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+    expect(toastWarningMock).not.toHaveBeenCalled();
+
+    rerender({ isProxyRunning: false });
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(toastWarningMock).toHaveBeenCalledTimes(1);
+    expect(toastWarningMock).toHaveBeenCalledWith(
+      expect.stringContaining("Claude Desktop 本地路由模式"),
+    );
   });
 
   it("allows the built-in Codex official provider during takeover", async () => {

@@ -71,6 +71,9 @@ describe("UsageDashboard web runtime", () => {
     expect(
       screen.queryByRole("button", { name: "usage.appFilter.opencode" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("usage.rebuildCodex.title"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the usage trend chart in desktop runtime", () => {
@@ -82,5 +85,6 @@ describe("UsageDashboard web runtime", () => {
     expect(
       screen.getByRole("button", { name: "usage.appFilter.opencode" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("usage.rebuildCodex.title")).toBeInTheDocument();
   });
 });

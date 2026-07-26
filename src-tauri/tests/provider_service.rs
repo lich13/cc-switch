@@ -224,6 +224,7 @@ command = "say"
                 claude: false,
                 codex: true,
                 gemini: false,
+                grokbuild: false,
                 opencode: false,
                 hermes: false,
             },

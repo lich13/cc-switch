@@ -1,20 +1,36 @@
 import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { providersApi } from "@/lib/api/providers";
 import {
   resetProviderState,
   setCurrentProviderId,
   setLiveProviderIds,
+  setProviderForEdit,
   setProviders,
+  setSettings,
 } from "../msw/state";
+import { server } from "../msw/server";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
 vi.setConfig({ testTimeout: 20_000 });
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const runtimeMocks = vi.hoisted(() => ({
+  isWebRuntime: vi.fn(() => false),
+}));
+
+vi.mock("@/lib/runtime", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/runtime")>("@/lib/runtime");
+  return {
+    ...actual,
+    isWebRuntime: () => runtimeMocks.isWebRuntime(),
+  };
+});
 
 vi.mock("sonner", () => ({
   toast: {
@@ -77,25 +93,39 @@ vi.mock("@/components/providers/AddProviderDialog", () => ({
 }));
 
 vi.mock("@/components/providers/EditProviderDialog", () => ({
-  EditProviderDialog: ({ open, provider, onSubmit, onOpenChange }: any) =>
-    open ? (
-      <div data-testid="edit-provider-dialog">
-        <button
-          onClick={() =>
-            onSubmit({
-              provider: {
-                ...provider,
-                name: `${provider.name}-edited`,
-              },
-              originalId: provider.id,
-            })
-          }
-        >
-          confirm-edit
-        </button>
-        <button onClick={() => onOpenChange(false)}>close-edit</button>
-      </div>
-    ) : null,
+  EditProviderDialog: ({
+    open,
+    provider,
+    onSubmit,
+    onOpenChange,
+    onExitComplete,
+  }: any) => (
+    <div data-testid="edit-provider-shell" data-open={String(open)}>
+      <output data-testid="edit-provider-payload">
+        {provider ? JSON.stringify(provider) : ""}
+      </output>
+      {open ? (
+        <div data-testid="edit-provider-dialog">
+          <button
+            onClick={async () => {
+              await onSubmit({
+                provider: {
+                  ...provider,
+                  name: `${provider.name}-edited`,
+                },
+                originalId: provider.id,
+              });
+              onOpenChange(false);
+            }}
+          >
+            confirm-edit
+          </button>
+          <button onClick={() => onOpenChange(false)}>close-edit</button>
+        </div>
+      ) : null}
+      <button onClick={() => onExitComplete?.()}>finish-edit-exit</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/UsageScriptModal", () => ({
@@ -149,33 +179,30 @@ vi.mock("@/components/mcp/McpPanel", () => ({
 
 const renderApp = (AppComponent: ComponentType) => {
   const client = new QueryClient();
-  return render(
+  const result = render(
     <QueryClientProvider client={client}>
       <Suspense fallback={<div data-testid="loading">loading</div>}>
         <AppComponent />
       </Suspense>
     </QueryClientProvider>,
   );
+  return { ...result, client };
 };
 
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
+    runtimeMocks.isWebRuntime.mockReset();
+    runtimeMocks.isWebRuntime.mockReturnValue(false);
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    window.localStorage.clear();
   });
 
   it("covers basic provider flows via real hooks", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
-
-    fireEvent.click(screen.getByText("switch-codex"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
         "codex-1",
@@ -228,7 +255,7 @@ describe("App integration with MSW", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
+        "codex-1",
       ),
     );
 
@@ -265,6 +292,18 @@ describe("App integration with MSW", () => {
   });
 
   it("duplicates openclaw providers with a generated key that avoids live-only ids", async () => {
+    setSettings({
+      visibleApps: {
+        claude: false,
+        "claude-desktop": false,
+        codex: true,
+        gemini: false,
+        grokbuild: true,
+        opencode: false,
+        openclaw: true,
+        hermes: false,
+      },
+    });
     setProviders("openclaw", {
       deepseek: {
         id: "deepseek",
@@ -308,6 +347,18 @@ describe("App integration with MSW", () => {
   });
 
   it("shows toast when duplicate cannot load live provider ids", async () => {
+    setSettings({
+      visibleApps: {
+        claude: false,
+        "claude-desktop": false,
+        codex: true,
+        gemini: false,
+        grokbuild: true,
+        opencode: false,
+        openclaw: true,
+        hermes: false,
+      },
+    });
     setProviders("openclaw", {
       deepseek: {
         id: "deepseek",
@@ -353,5 +404,96 @@ describe("App integration with MSW", () => {
     );
 
     liveIdsSpy.mockRestore();
+  });
+
+  it("loads a web provider edit detail on demand and clears it after exit", async () => {
+    runtimeMocks.isWebRuntime.mockReturnValue(true);
+    window.localStorage.setItem("cc-switch-last-app", "codex");
+
+    const maskedProvider = {
+      id: "codex-secret",
+      name: "Masked Codex",
+      category: "custom" as const,
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "secret_configured" },
+        config: 'model = "gpt-5"',
+      },
+    };
+    const editDetail = {
+      ...maskedProvider,
+      settingsConfig: {
+        ...maskedProvider.settingsConfig,
+        auth: { OPENAI_API_KEY: "sk-web-edit-detail" },
+      },
+    };
+    setProviders("codex", { [maskedProvider.id]: maskedProvider });
+    setProviderForEdit("codex", maskedProvider.id, editDetail);
+    setCurrentProviderId("codex", maskedProvider.id);
+
+    const { default: App } = await import("@/App");
+    const { client } = renderApp(App);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("provider-list")).toHaveTextContent(
+        "secret_configured",
+      );
+    });
+    expect(screen.getByTestId("provider-list")).not.toHaveTextContent(
+      "sk-web-edit-detail",
+    );
+
+    fireEvent.click(screen.getByText("edit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-provider-payload")).toHaveTextContent(
+        "sk-web-edit-detail",
+      );
+    });
+
+    const queryData = client
+      .getQueryCache()
+      .getAll()
+      .map((query) => query.state.data);
+    expect(JSON.stringify(queryData)).not.toContain("sk-web-edit-detail");
+    expect(JSON.stringify(window.localStorage)).not.toContain(
+      "sk-web-edit-detail",
+    );
+
+    fireEvent.click(screen.getByText("close-edit"));
+    expect(
+      screen.queryByTestId("edit-provider-dialog"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("edit-provider-payload")).toHaveTextContent(
+      "sk-web-edit-detail",
+    );
+
+    fireEvent.click(screen.getByText("finish-edit-exit"));
+    await waitFor(() => {
+      expect(screen.getByTestId("edit-provider-payload")).toBeEmptyDOMElement();
+    });
+  });
+
+  it("does not open the web edit panel when loading detail fails", async () => {
+    runtimeMocks.isWebRuntime.mockReturnValue(true);
+    window.localStorage.setItem("cc-switch-last-app", "codex");
+    server.use(
+      http.post("http://tauri.local/get_provider_for_edit", () =>
+        HttpResponse.json({ error: "detail unavailable" }, { status: 500 }),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("codex-1"),
+    );
+    fireEvent.click(screen.getByText("edit"));
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+    expect(
+      screen.queryByTestId("edit-provider-dialog"),
+    ).not.toBeInTheDocument();
   });
 });

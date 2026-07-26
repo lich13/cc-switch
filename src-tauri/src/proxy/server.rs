@@ -18,6 +18,7 @@ use super::{
     ProxyError,
 };
 use crate::database::Database;
+use crate::managed_auth::ManagedAuthManagers;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{any, get, post},
@@ -46,6 +47,8 @@ pub struct ProxyState {
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
+    /// 无头 Web 服务使用的托管认证状态。
+    pub(crate) managed_auth: ManagedAuthManagers,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
 }
@@ -64,6 +67,7 @@ impl ProxyServer {
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
+        managed_auth: ManagedAuthManagers,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -80,6 +84,7 @@ impl ProxyServer {
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
+            managed_auth,
             failover_manager,
         };
 
@@ -327,6 +332,12 @@ impl ProxyServer {
             .route("/v1/responses", post(handlers::handle_responses))
             .route("/v1/v1/responses", post(handlers::handle_responses))
             .route("/codex/v1/responses", post(handlers::handle_responses))
+            // Grok Build uses the Responses protocol but has an independent
+            // provider namespace and failover queue.
+            .route(
+                "/grokbuild/v1/responses",
+                post(handlers::handle_grokbuild_responses),
+            )
             // OpenAI Responses Compact API (Codex CLI 远程压缩，透传)
             .route(
                 "/responses/compact",
@@ -343,6 +354,10 @@ impl ProxyServer {
             .route(
                 "/codex/v1/responses/compact",
                 post(handlers::handle_responses_compact),
+            )
+            .route(
+                "/grokbuild/v1/responses/compact",
+                post(handlers::handle_grokbuild_responses_compact),
             )
             // Gemini API (支持带前缀和不带前缀)
             //

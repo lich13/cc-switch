@@ -13,11 +13,13 @@ use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{str::FromStr, sync::LazyLock};
+use toml_edit::visit_mut::{visit_table_like_kv_mut, VisitMut};
 
 const SECRET_CONFIGURED_PLACEHOLDER: &str = "secret_configured";
+const XAI_OAUTH_WEB_ERROR: &str = "WebUI 不允许创建、修改、删除或查看 xAI OAuth 供应商编辑详情";
 static SECRET_ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?im)(?P<prefix>\b(?:api_key|openai_api_key|anthropic_auth_token|anthropic_api_key|gemini_api_key|google_api_key|openrouter_api_key|experimental_bearer_token|access_token|refresh_token|id_token|secret_access_key|password)\b\s*[:=]\s*["']?)(?P<value>[^"'\n\r#]+)(?P<suffix>["']?)"#,
+        r#"(?im)(?P<prefix>\b(?:[a-z0-9_.-]*(?:api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|bearer[_-]?token|password|client[_-]?secret|secret[_-]?access[_-]?key))\b["']?\s*[:=]\s*["']?)(?P<value>[^"'\n\r,#}\]]+)(?P<suffix>["']?)"#,
     )
     .expect("secret assignment regex")
 });
@@ -28,11 +30,26 @@ pub async fn dispatch(
     args: Value,
     production: bool,
 ) -> Result<Value, String> {
+    let reveal_form_api_keys = matches!(
+        command,
+        "get_provider_for_edit" | "get_universal_provider_for_edit"
+    );
     let data = match command {
         // Provider management
         "get_providers" => {
             let app = app_type(arg(&args, "app")?)?;
             to_value(ProviderService::list(state, app)?)?
+        }
+        "get_provider_for_edit" => {
+            let app = app_type(arg(&args, "app")?)?;
+            let id: String = arg(&args, "id")?;
+            let provider = state
+                .db
+                .get_provider_by_id(&id, app.as_str())
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("供应商不存在: {id}"))?;
+            reject_xai_oauth_web_provider(&provider)?;
+            to_value(provider)?
         }
         "get_current_provider" => {
             let app = app_type(arg(&args, "app")?)?;
@@ -41,6 +58,14 @@ pub async fn dispatch(
         "add_provider" => {
             let app = app_type(arg(&args, "app")?)?;
             let provider: Provider = arg(&args, "provider")?;
+            reject_xai_oauth_web_provider(&provider)?;
+            if let Some(existing) = state
+                .db
+                .get_provider_by_id(&provider.id, app.as_str())
+                .map_err(|e| e.to_string())?
+            {
+                reject_xai_oauth_web_provider(&existing)?;
+            }
             reject_unresolved_secret_placeholders(&provider.settings_config)?;
             validate_provider_surface(&provider, production)?;
             let add_to_live = opt_arg(&args, "addToLive")?.unwrap_or(false);
@@ -51,6 +76,14 @@ pub async fn dispatch(
             let mut provider: Provider = arg(&args, "provider")?;
             let original_id: Option<String> = opt_arg(&args, "originalId")?;
             let original_lookup = original_id.clone().unwrap_or_else(|| provider.id.clone());
+            reject_xai_oauth_web_provider(&provider)?;
+            if let Some(existing) = state
+                .db
+                .get_provider_by_id(&original_lookup, app.as_str())
+                .map_err(|e| e.to_string())?
+            {
+                reject_xai_oauth_web_provider(&existing)?;
+            }
             restore_provider_secret_placeholders(state, &app, &original_lookup, &mut provider)?;
             validate_provider_surface(&provider, production)?;
             to_value(ProviderService::update(
@@ -63,23 +96,35 @@ pub async fn dispatch(
         "delete_provider" => {
             let app = app_type(arg(&args, "app")?)?;
             let id: String = arg(&args, "id")?;
+            if let Some(existing) = state
+                .db
+                .get_provider_by_id(&id, app.as_str())
+                .map_err(|e| e.to_string())?
+            {
+                reject_xai_oauth_web_provider(&existing)?;
+            }
             ProviderService::delete(state, app, &id)?;
             json!(true)
         }
         "remove_provider_from_live_config" => {
             let app = app_type(arg(&args, "app")?)?;
             let id: String = arg(&args, "id")?;
+            reject_xai_oauth_web_provider_by_id(state, &app, &id)?;
             ProviderService::remove_from_live_config(state, app, &id)?;
             json!(true)
         }
         "switch_provider" => {
             let app = app_type(arg(&args, "app")?)?;
             let id: String = arg(&args, "id")?;
+            reject_xai_oauth_web_provider_by_id(state, &app, &id)?;
             to_value(ProviderService::switch(state, app, &id)?)?
         }
         "update_providers_sort_order" => {
             let app = app_type(arg(&args, "app")?)?;
             let updates: Vec<ProviderSortUpdate> = arg(&args, "updates")?;
+            for update in &updates {
+                reject_xai_oauth_web_provider_by_id(state, &app, &update.id)?;
+            }
             ProviderService::update_sort_order(state, app, updates)?;
             json!(true)
         }
@@ -102,6 +147,10 @@ pub async fn dispatch(
             let id: String = arg(&args, "id")?;
             to_value(ProviderService::get_universal(state, &id)?)?
         }
+        "get_universal_provider_for_edit" => {
+            let id: String = arg(&args, "id")?;
+            to_value(ProviderService::get_universal(state, &id)?)?
+        }
         "upsert_universal_provider" => {
             let mut provider: crate::provider::UniversalProvider = arg(&args, "provider")?;
             restore_universal_provider_secret_placeholder(state, &mut provider)?;
@@ -118,6 +167,60 @@ pub async fn dispatch(
         "sync_universal_provider" => {
             let id: String = arg(&args, "id")?;
             to_value(ProviderService::sync_universal_to_apps(state, &id)?)?
+        }
+
+        // Managed OAuth account operations available to the WebUI.
+        "auth_start_login" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            let github_domain: Option<String> = opt_arg(&args, "githubDomain")?;
+            to_value(
+                state
+                    .managed_auth
+                    .web_start_login(&auth_provider, github_domain.as_deref())
+                    .await?,
+            )?
+        }
+        "auth_poll_for_account" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            let device_code: String = arg(&args, "deviceCode")?;
+            let github_domain: Option<String> = opt_arg(&args, "githubDomain")?;
+            to_value(
+                state
+                    .managed_auth
+                    .web_poll_for_account(&auth_provider, &device_code, github_domain.as_deref())
+                    .await?,
+            )?
+        }
+        "auth_list_accounts" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            to_value(state.managed_auth.web_list_accounts(&auth_provider).await?)?
+        }
+        "auth_get_status" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            to_value(state.managed_auth.web_get_status(&auth_provider).await?)?
+        }
+        "auth_remove_account" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            let account_id: String = arg(&args, "accountId")?;
+            state
+                .managed_auth
+                .web_remove_account(&auth_provider, &account_id)
+                .await?;
+            Value::Null
+        }
+        "auth_set_default_account" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            let account_id: String = arg(&args, "accountId")?;
+            state
+                .managed_auth
+                .web_set_default_account(&auth_provider, &account_id)
+                .await?;
+            Value::Null
+        }
+        "auth_logout" => {
+            let auth_provider: String = arg(&args, "authProvider")?;
+            state.managed_auth.web_logout(&auth_provider).await?;
+            Value::Null
         }
 
         // Settings and desktop-only safe fallbacks
@@ -152,6 +255,69 @@ pub async fn dispatch(
         "get_app_config_path" => to_value(crate::config::get_app_config_path().to_string_lossy())?,
         "get_claude_code_config_path" => {
             to_value(crate::config::get_claude_settings_path().to_string_lossy())?
+        }
+        "get_common_config_snippet" => {
+            let app_type: String = arg(&args, "appType")?;
+            let app = web_common_config_app_type(&app_type)?;
+            to_value(
+                state
+                    .db
+                    .get_config_snippet(app.as_str())
+                    .map_err(|e| e.to_string())?,
+            )?
+        }
+        "set_common_config_snippet" => {
+            let app_type: String = arg(&args, "appType")?;
+            let app = web_common_config_app_type(&app_type)?;
+            let mut snippet: String = arg(&args, "snippet")?;
+            let old_snippet = state
+                .db
+                .get_config_snippet(app.as_str())
+                .map_err(|e| e.to_string())?;
+
+            if let Some(existing) = old_snippet.as_deref() {
+                snippet = restore_embedded_secret_placeholders(&snippet, existing);
+            }
+            reject_unresolved_secret_placeholders(&Value::String(snippet.clone()))?;
+            crate::commands::validate_common_config_snippet(app.as_str(), &snippet)?;
+
+            if let Some(legacy_snippet) = old_snippet
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                ProviderService::migrate_legacy_common_config_usage(
+                    state,
+                    app.clone(),
+                    legacy_snippet,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            let is_cleared = snippet.trim().is_empty();
+            let value = (!is_cleared).then_some(snippet);
+            state
+                .db
+                .set_config_snippet(app.as_str(), value)
+                .map_err(|e| e.to_string())?;
+            state
+                .db
+                .set_config_snippet_cleared(app.as_str(), is_cleared)
+                .map_err(|e| e.to_string())?;
+            json!(true)
+        }
+        "extract_common_config_snippet" => {
+            let app_type: String = arg(&args, "appType")?;
+            let app = web_common_config_app_type(&app_type)?;
+            let settings_config: String = arg(&args, "settingsConfig")?;
+            if settings_config.trim().is_empty() {
+                return Err("WebUI 提取通用配置必须提供非空 settingsConfig".to_string());
+            }
+            let settings: Value = serde_json::from_str(&settings_config)
+                .map_err(|e| format!("settingsConfig 不是有效 JSON: {e}"))?;
+            to_value(
+                ProviderService::extract_common_config_snippet_from_settings(app, &settings)
+                    .map_err(|e| e.to_string())?,
+            )?
         }
         "update_toml_common_config_snippet" => {
             let config_toml: String = arg(&args, "configToml")?;
@@ -571,7 +737,13 @@ pub async fn dispatch(
     };
 
     let mut data = data;
-    redact_secrets(&mut data);
+    if reveal_form_api_keys {
+        redact_secrets_for_edit(&mut data);
+    } else if matches!(command, "get_providers" | "get_universal_providers") {
+        redact_provider_collection(&mut data);
+    } else {
+        redact_secrets(&mut data);
+    }
     Ok(data)
 }
 
@@ -598,12 +770,41 @@ fn app_type(value: String) -> Result<AppType, String> {
     AppType::from_str(&value).map_err(|e| e.to_string())
 }
 
+fn web_common_config_app_type(value: &str) -> Result<AppType, String> {
+    match value {
+        "claude" | "codex" | "gemini" => AppType::from_str(value).map_err(|e| e.to_string()),
+        _ => Err(format!("WebUI 不支持 {value} 的通用配置片段")),
+    }
+}
+
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
 fn reject_desktop_command(command: &str) -> Result<Value, String> {
     Err(format!("WebUI 安全边界未开放桌面专属命令: {command}"))
+}
+
+fn reject_xai_oauth_web_provider(provider: &Provider) -> Result<(), String> {
+    if provider.is_xai_oauth() {
+        return Err(XAI_OAUTH_WEB_ERROR.to_string());
+    }
+    Ok(())
+}
+
+fn reject_xai_oauth_web_provider_by_id(
+    state: &AppState,
+    app: &AppType,
+    id: &str,
+) -> Result<(), String> {
+    if let Some(provider) = state
+        .db
+        .get_provider_by_id(id, app.as_str())
+        .map_err(|e| e.to_string())?
+    {
+        reject_xai_oauth_web_provider(&provider)?;
+    }
+    Ok(())
 }
 
 fn restore_provider_secret_placeholders(
@@ -687,7 +888,7 @@ fn restore_secret_placeholders(incoming: &mut Value, existing: Option<&Value>) {
         }
         Value::String(text) => {
             if let Some(Value::String(existing_text)) = existing {
-                *text = restore_secret_assignments(text, existing_text);
+                *text = restore_embedded_secret_placeholders(text, existing_text);
             }
         }
         _ => {}
@@ -699,31 +900,52 @@ fn is_secret_placeholder_value(value: &Value) -> bool {
 }
 
 fn redact_secrets(value: &mut Value) {
+    redact_secrets_with_policy(value, false);
+}
+
+fn redact_secrets_for_edit(value: &mut Value) {
+    redact_secrets_with_policy(value, true);
+}
+
+fn redact_provider_collection(value: &mut Value) {
+    let Value::Object(providers) = value else {
+        redact_secrets(value);
+        return;
+    };
+
+    // Provider IDs are arbitrary map keys and may legitimately contain words
+    // such as "api-key". Only provider values participate in secret detection.
+    for provider in providers.values_mut() {
+        redact_secrets(provider);
+    }
+}
+
+fn redact_secrets_with_policy(value: &mut Value, reveal_form_api_keys: bool) {
     match value {
         Value::Object(map) => {
             let keys = map.keys().cloned().collect::<Vec<_>>();
             for key in keys {
                 if let Some(item) = map.get_mut(&key) {
+                    if reveal_form_api_keys && is_form_api_key(&key) && item.as_str().is_some() {
+                        continue;
+                    }
                     if is_secret_key(&key) {
                         if secret_value_configured(item) {
                             *item = Value::String(SECRET_CONFIGURED_PLACEHOLDER.to_string());
                         }
                     } else {
-                        redact_secrets(item);
-                        if let Value::String(text) = item {
-                            *text = redact_secret_assignments(text);
-                        }
+                        redact_secrets_with_policy(item, reveal_form_api_keys);
                     }
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                redact_secrets(item);
+                redact_secrets_with_policy(item, reveal_form_api_keys);
             }
         }
         Value::String(text) => {
-            *text = redact_secret_assignments(text);
+            *text = redact_embedded_config_text(text, reveal_form_api_keys);
         }
         _ => {}
     }
@@ -757,6 +979,63 @@ fn is_secret_key(key: &str) -> bool {
         || normalized.ends_with("password")
         || normalized.ends_with("clientsecret")
         || normalized.ends_with("secretaccesskey")
+}
+
+fn is_form_api_key(key: &str) -> bool {
+    matches!(
+        key,
+        "apiKey"
+            | "api_key"
+            | "OPENAI_API_KEY"
+            | "ANTHROPIC_AUTH_TOKEN"
+            | "ANTHROPIC_API_KEY"
+            | "GEMINI_API_KEY"
+            | "GOOGLE_API_KEY"
+            | "OPENROUTER_API_KEY"
+            | "experimental_bearer_token"
+    )
+}
+
+fn redact_embedded_config_text(text: &str, reveal_form_api_keys: bool) -> String {
+    if let Ok(mut json) = serde_json::from_str::<Value>(text) {
+        if json.is_object() || json.is_array() {
+            redact_secrets_with_policy(&mut json, reveal_form_api_keys);
+            if let Ok(serialized) = serde_json::to_string(&json) {
+                return serialized;
+            }
+        }
+    }
+
+    if let Ok(mut document) = text.parse::<toml_edit::DocumentMut>() {
+        TomlSecretRedactor {
+            reveal_form_api_keys,
+        }
+        .visit_document_mut(&mut document);
+        return document.to_string();
+    }
+
+    redact_secret_assignments(text)
+}
+
+struct TomlSecretRedactor {
+    reveal_form_api_keys: bool,
+}
+
+impl VisitMut for TomlSecretRedactor {
+    fn visit_table_like_kv_mut(&mut self, key: toml_edit::KeyMut<'_>, node: &mut toml_edit::Item) {
+        let key_name = key.get().to_string();
+        if self.reveal_form_api_keys && is_form_api_key(&key_name) && node.as_str().is_some() {
+            return;
+        }
+        if is_secret_key(&key_name) {
+            let empty = node.as_str().is_some_and(|value| value.trim().is_empty());
+            if !node.is_none() && !empty {
+                *node = toml_edit::value(SECRET_CONFIGURED_PLACEHOLDER);
+            }
+            return;
+        }
+        visit_table_like_kv_mut(self, key, node);
+    }
 }
 
 fn redact_secret_assignments(text: &str) -> String {
@@ -804,6 +1083,64 @@ fn restore_secret_assignments(incoming: &str, existing: &str) -> String {
             format!("{}{}{}", &caps["prefix"], value, &caps["suffix"])
         })
         .into_owned()
+}
+
+fn restore_embedded_secret_placeholders(incoming: &str, existing: &str) -> String {
+    if let (Ok(mut incoming_json), Ok(existing_json)) = (
+        serde_json::from_str::<Value>(incoming),
+        serde_json::from_str::<Value>(existing),
+    ) {
+        if (incoming_json.is_object() || incoming_json.is_array())
+            && (existing_json.is_object() || existing_json.is_array())
+        {
+            restore_secret_placeholders(&mut incoming_json, Some(&existing_json));
+            if let Ok(serialized) = serde_json::to_string(&incoming_json) {
+                return serialized;
+            }
+        }
+    }
+
+    if incoming.contains(SECRET_CONFIGURED_PLACEHOLDER) {
+        if let (Ok(mut incoming_toml), Ok(existing_toml)) = (
+            toml::from_str::<toml::Value>(incoming),
+            toml::from_str::<toml::Value>(existing),
+        ) {
+            restore_toml_secret_placeholders(&mut incoming_toml, Some(&existing_toml));
+            if let Ok(serialized) = toml::to_string(&incoming_toml) {
+                return serialized;
+            }
+        }
+    }
+
+    restore_secret_assignments(incoming, existing)
+}
+
+fn restore_toml_secret_placeholders(incoming: &mut toml::Value, existing: Option<&toml::Value>) {
+    match incoming {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                let existing_value = existing.and_then(|value| value.get(key));
+                if is_secret_key(key) && value.as_str() == Some(SECRET_CONFIGURED_PLACEHOLDER) {
+                    if let Some(existing_value) = existing_value {
+                        *value = existing_value.clone();
+                    }
+                } else {
+                    restore_toml_secret_placeholders(value, existing_value);
+                }
+            }
+        }
+        toml::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                restore_toml_secret_placeholders(item, existing.and_then(|value| value.get(index)));
+            }
+        }
+        toml::Value::String(text) => {
+            if let Some(existing) = existing.and_then(toml::Value::as_str) {
+                *text = restore_secret_assignments(text, existing);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn get_model_pricing(state: &AppState) -> Result<Vec<crate::commands::ModelPricingInfo>, AppError> {
@@ -1057,6 +1394,7 @@ fn config_dir_for_app(app: AppType) -> Result<std::path::PathBuf, String> {
         }
         AppType::Codex => crate::codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
+        AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
         AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
@@ -1161,6 +1499,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(Database::init_at(dir.path().join("cc-switch.db")).expect("init db"));
         (dir, AppState::new(db))
+    }
+
+    #[test]
+    fn grokbuild_config_dir_uses_the_existing_grok_path() {
+        assert_eq!(
+            config_dir_for_app(AppType::GrokBuild).expect("Grok Build config dir"),
+            crate::grok_config::get_grok_config_dir()
+        );
     }
 
     #[tokio::test]
@@ -1342,6 +1688,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn common_config_snippet_commands_are_available_to_web_without_live_reads() {
+        let (_dir, state) = temp_state();
+
+        dispatch(
+            &state,
+            "set_common_config_snippet",
+            json!({
+                "appType": "codex",
+                "snippet": "# shared\n[tui]\nnotifications = false\nexperimental_bearer_token = \"stored-secret\"\n"
+            }),
+            false,
+        )
+        .await
+        .expect("save Codex common config snippet");
+
+        let loaded = dispatch(
+            &state,
+            "get_common_config_snippet",
+            json!({ "appType": "codex" }),
+            false,
+        )
+        .await
+        .expect("load Codex common config snippet");
+        let loaded = loaded.as_str().expect("common config string");
+        assert!(loaded.contains("notifications = false"));
+        assert!(loaded.contains(SECRET_CONFIGURED_PLACEHOLDER));
+        assert!(!loaded.contains("stored-secret"));
+
+        dispatch(
+            &state,
+            "set_common_config_snippet",
+            json!({ "appType": "codex", "snippet": loaded }),
+            false,
+        )
+        .await
+        .expect("round-trip redacted common config snippet");
+        let stored = state
+            .db
+            .get_config_snippet("codex")
+            .expect("query common config snippet")
+            .expect("stored common config snippet");
+        assert!(stored.contains("stored-secret"));
+        assert!(!stored.contains(SECRET_CONFIGURED_PLACEHOLDER));
+
+        let extracted = dispatch(
+            &state,
+            "extract_common_config_snippet",
+            json!({
+                "appType": "codex",
+                "settingsConfig": serde_json::to_string(&json!({
+                    "auth": { "OPENAI_API_KEY": "provider-secret" },
+                    "config": "model = \"gpt-5.6\"\n[tui]\nnotifications = true\n"
+                }))
+                .expect("serialize settings")
+            }),
+            false,
+        )
+        .await
+        .expect("extract common config from editor settings");
+        let extracted = extracted.as_str().expect("extracted common config");
+        assert!(extracted.contains("[tui]"));
+        assert!(extracted.contains("notifications = true"));
+        assert!(!extracted.contains("provider-secret"));
+        assert!(!extracted.contains("model ="));
+
+        let err = dispatch(
+            &state,
+            "extract_common_config_snippet",
+            json!({ "appType": "codex" }),
+            false,
+        )
+        .await
+        .expect_err("WebUI must not extract from live files");
+        assert!(err.contains("settingsConfig"), "{err}");
+
+        let err = dispatch(
+            &state,
+            "set_common_config_snippet",
+            json!({ "appType": "codex", "snippet": "[broken" }),
+            false,
+        )
+        .await
+        .expect_err("invalid TOML must be rejected");
+        assert!(err.contains("TOML") || err.contains("toml") || err.contains("格式"));
+
+        let err = dispatch(
+            &state,
+            "get_common_config_snippet",
+            json!({ "appType": "grokbuild" }),
+            false,
+        )
+        .await
+        .expect_err("unsupported common config app must be rejected");
+        assert!(err.contains("不支持"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn web_managed_auth_exposes_copilot_and_codex_but_rejects_xai() {
+        let (_dir, state) = temp_state();
+
+        for provider in ["github_copilot", "codex_oauth"] {
+            let status = dispatch(
+                &state,
+                "auth_get_status",
+                json!({ "authProvider": provider }),
+                false,
+            )
+            .await
+            .expect("WebUI managed auth status");
+            assert_eq!(
+                status.get("provider").and_then(Value::as_str),
+                Some(provider)
+            );
+            assert_eq!(
+                status.get("authenticated").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                status
+                    .get("accounts")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(0)
+            );
+
+            let accounts = dispatch(
+                &state,
+                "auth_list_accounts",
+                json!({ "authProvider": provider }),
+                false,
+            )
+            .await
+            .expect("WebUI managed auth accounts");
+            assert_eq!(accounts.as_array().map(Vec::len), Some(0));
+
+            dispatch(
+                &state,
+                "auth_logout",
+                json!({ "authProvider": provider }),
+                false,
+            )
+            .await
+            .expect("WebUI managed auth logout");
+        }
+
+        for (command, args) in [
+            ("auth_get_status", json!({ "authProvider": "xai_oauth" })),
+            ("auth_list_accounts", json!({ "authProvider": "xai_oauth" })),
+            ("auth_start_login", json!({ "authProvider": "xai_oauth" })),
+            (
+                "auth_poll_for_account",
+                json!({
+                    "authProvider": "xai_oauth",
+                    "deviceCode": "not-used",
+                }),
+            ),
+            (
+                "auth_remove_account",
+                json!({
+                    "authProvider": "xai_oauth",
+                    "accountId": "not-used",
+                }),
+            ),
+            (
+                "auth_set_default_account",
+                json!({
+                    "authProvider": "xai_oauth",
+                    "accountId": "not-used",
+                }),
+            ),
+            ("auth_logout", json!({ "authProvider": "xai_oauth" })),
+        ] {
+            let err = dispatch(&state, command, args, false)
+                .await
+                .expect_err("WebUI must reject xAI OAuth account management");
+            assert!(
+                err.contains("xAI OAuth") && err.contains("WebUI"),
+                "{command}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn project_profile_commands_remain_desktop_only() {
         let (_dir, state) = temp_state();
 
@@ -1511,6 +2040,504 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_ids_that_look_like_secret_fields_remain_provider_objects() {
+        let (_dir, state) = temp_state();
+        let provider = Provider::with_id(
+            "qa-api-key".to_string(),
+            "API Key ID Provider".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "sk-real-secret"
+                },
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\n"
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider("codex", &provider)
+            .expect("save provider");
+
+        let providers = dispatch(&state, "get_providers", json!({ "app": "codex" }), false)
+            .await
+            .expect("get providers");
+        let listed = providers
+            .get("qa-api-key")
+            .expect("provider id should remain a map key");
+
+        assert!(listed.is_object(), "provider entry must remain an object");
+        assert_eq!(
+            listed.get("name").and_then(Value::as_str),
+            Some("API Key ID Provider")
+        );
+        assert_eq!(
+            listed
+                .pointer("/settingsConfig/auth/OPENAI_API_KEY")
+                .and_then(Value::as_str),
+            Some(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_edit_detail_reveals_only_form_api_keys() {
+        let (_dir, state) = temp_state();
+        let provider = Provider::with_id(
+            "edit-secure".to_string(),
+            "Edit Secure".to_string(),
+            json!({
+                "apiKey": "form-camel-key",
+                "api_key": "form-snake-key",
+                "env": {
+                    "OPENAI_API_KEY": "form-openai-key",
+                    "ANTHROPIC_AUTH_TOKEN": "form-anthropic-auth",
+                    "ANTHROPIC_API_KEY": "form-anthropic-key",
+                    "GEMINI_API_KEY": "form-gemini-key",
+                    "GOOGLE_API_KEY": "form-google-key",
+                    "OPENROUTER_API_KEY": "form-openrouter-key",
+                    "access_token": "oauth-access-secret",
+                    "refresh_token": "oauth-refresh-secret",
+                    "id_token": "oauth-id-secret",
+                    "password": "password-secret",
+                    "clientSecret": "client-secret",
+                    "secretAccessKey": "aws-secret-access-key"
+                },
+                "jsonConfig": r#"{"apiKey":"json-form-key","oauth":{"access_token":"json-oauth-secret"},"nested":{"OPENROUTER_API_KEY":"json-openrouter-key","clientSecret":"json-client-secret"}}"#,
+                "tomlConfig": "api_key = \"toml-form-key\"\naccess_token = \"toml-oauth-secret\"\n[nested]\nexperimental_bearer_token = \"toml-bearer-key\"\npassword = \"toml-password-secret\"\n",
+                "opaqueConfig": "OPENAI_API_KEY = opaque-form-key\n"
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider("claude", &provider)
+            .expect("save provider");
+
+        let listed = dispatch(&state, "get_providers", json!({ "app": "claude" }), false)
+            .await
+            .expect("list providers");
+        let listed_text = serde_json::to_string(&listed).expect("serialize provider list");
+        for secret in [
+            "form-camel-key",
+            "form-openai-key",
+            "form-anthropic-auth",
+            "form-openrouter-key",
+            "json-form-key",
+            "toml-form-key",
+            "toml-bearer-key",
+            "oauth-access-secret",
+            "client-secret",
+        ] {
+            assert!(!listed_text.contains(secret), "list leaked {secret}");
+        }
+        assert!(listed_text.contains(SECRET_CONFIGURED_PLACEHOLDER));
+
+        let edit = dispatch(
+            &state,
+            "get_provider_for_edit",
+            json!({ "app": "claude", "id": "edit-secure" }),
+            false,
+        )
+        .await
+        .expect("get provider for edit");
+        let settings = edit.get("settingsConfig").expect("settingsConfig");
+
+        for (pointer, expected) in [
+            ("/apiKey", "form-camel-key"),
+            ("/api_key", "form-snake-key"),
+            ("/env/OPENAI_API_KEY", "form-openai-key"),
+            ("/env/ANTHROPIC_AUTH_TOKEN", "form-anthropic-auth"),
+            ("/env/ANTHROPIC_API_KEY", "form-anthropic-key"),
+            ("/env/GEMINI_API_KEY", "form-gemini-key"),
+            ("/env/GOOGLE_API_KEY", "form-google-key"),
+            ("/env/OPENROUTER_API_KEY", "form-openrouter-key"),
+        ] {
+            assert_eq!(
+                settings.pointer(pointer).and_then(Value::as_str),
+                Some(expected)
+            );
+        }
+
+        for pointer in [
+            "/env/access_token",
+            "/env/refresh_token",
+            "/env/id_token",
+            "/env/password",
+            "/env/clientSecret",
+            "/env/secretAccessKey",
+        ] {
+            assert_eq!(
+                settings.pointer(pointer).and_then(Value::as_str),
+                Some(SECRET_CONFIGURED_PLACEHOLDER),
+                "sensitive field {pointer} was not redacted"
+            );
+        }
+
+        let json_config: Value = serde_json::from_str(
+            settings
+                .get("jsonConfig")
+                .and_then(Value::as_str)
+                .expect("JSON config"),
+        )
+        .expect("structured JSON remains valid");
+        assert_eq!(json_config["apiKey"], json!("json-form-key"));
+        assert_eq!(
+            json_config["nested"]["OPENROUTER_API_KEY"],
+            json!("json-openrouter-key")
+        );
+        assert_eq!(
+            json_config["oauth"]["access_token"],
+            json!(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+        assert_eq!(
+            json_config["nested"]["clientSecret"],
+            json!(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+
+        let toml_config: toml::Value = toml::from_str(
+            settings
+                .get("tomlConfig")
+                .and_then(Value::as_str)
+                .expect("TOML config"),
+        )
+        .expect("structured TOML remains valid");
+        assert_eq!(toml_config["api_key"].as_str(), Some("toml-form-key"));
+        assert_eq!(
+            toml_config["nested"]["experimental_bearer_token"].as_str(),
+            Some("toml-bearer-key")
+        );
+        assert_eq!(
+            toml_config["access_token"].as_str(),
+            Some(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+        assert_eq!(
+            toml_config["nested"]["password"].as_str(),
+            Some(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+
+        let opaque = settings
+            .get("opaqueConfig")
+            .and_then(Value::as_str)
+            .expect("opaque config");
+        assert!(!opaque.contains("opaque-form-key"));
+        assert!(opaque.contains(SECRET_CONFIGURED_PLACEHOLDER));
+
+        let edit_text = serde_json::to_string(&edit).expect("serialize edit provider");
+        for secret in [
+            "oauth-access-secret",
+            "oauth-refresh-secret",
+            "oauth-id-secret",
+            "password-secret",
+            "client-secret",
+            "aws-secret-access-key",
+            "json-oauth-secret",
+            "json-client-secret",
+            "toml-oauth-secret",
+            "toml-password-secret",
+            "opaque-form-key",
+        ] {
+            assert!(!edit_text.contains(secret), "edit detail leaked {secret}");
+        }
+    }
+
+    #[tokio::test]
+    async fn universal_provider_edit_detail_is_separate_from_redacted_reads() {
+        let (_dir, state) = temp_state();
+        let provider = crate::provider::UniversalProvider::new(
+            "universal-edit".to_string(),
+            "Universal Edit".to_string(),
+            "custom".to_string(),
+            "https://api.example.com".to_string(),
+            "universal-form-key".to_string(),
+        );
+        state
+            .db
+            .save_universal_provider(&provider)
+            .expect("save universal provider");
+
+        for command in ["get_universal_providers", "get_universal_provider"] {
+            let args = if command == "get_universal_provider" {
+                json!({ "id": "universal-edit" })
+            } else {
+                json!({})
+            };
+            let value = dispatch(&state, command, args, false)
+                .await
+                .expect("redacted universal read");
+            let text = serde_json::to_string(&value).expect("serialize universal read");
+            assert!(
+                !text.contains("universal-form-key"),
+                "{command} leaked API key"
+            );
+            assert!(text.contains(SECRET_CONFIGURED_PLACEHOLDER));
+        }
+
+        let edit = dispatch(
+            &state,
+            "get_universal_provider_for_edit",
+            json!({ "id": "universal-edit" }),
+            false,
+        )
+        .await
+        .expect("get universal provider for edit");
+        assert_eq!(
+            edit.get("apiKey").and_then(Value::as_str),
+            Some("universal-form-key")
+        );
+
+        let missing = dispatch(
+            &state,
+            "get_universal_provider_for_edit",
+            json!({ "id": "missing" }),
+            false,
+        )
+        .await
+        .expect("missing universal provider");
+        assert!(missing.is_null());
+    }
+
+    #[tokio::test]
+    async fn universal_provider_ids_that_look_like_secret_fields_remain_provider_objects() {
+        let (_dir, state) = temp_state();
+        let provider = crate::provider::UniversalProvider::new(
+            "universal-api-key".to_string(),
+            "Universal API Key ID".to_string(),
+            "custom".to_string(),
+            "https://api.example.com".to_string(),
+            "universal-real-secret".to_string(),
+        );
+        state
+            .db
+            .save_universal_provider(&provider)
+            .expect("save universal provider");
+
+        let providers = dispatch(&state, "get_universal_providers", json!({}), false)
+            .await
+            .expect("get universal providers");
+        let listed = providers
+            .get("universal-api-key")
+            .expect("provider id should remain a map key");
+
+        assert!(listed.is_object(), "provider entry must remain an object");
+        assert_eq!(
+            listed.get("name").and_then(Value::as_str),
+            Some("Universal API Key ID")
+        );
+        assert_eq!(
+            listed.get("apiKey").and_then(Value::as_str),
+            Some(SECRET_CONFIGURED_PLACEHOLDER)
+        );
+    }
+
+    #[tokio::test]
+    async fn web_rpc_rejects_xai_oauth_provider_crud_and_edit_detail() {
+        let (_dir, state) = temp_state();
+        let mut existing = Provider::with_id(
+            "xai-managed".to_string(),
+            "xAI Managed".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "managed-placeholder" },
+                "config": "model_provider = \"xai\"\n[model_providers.xai]\nname = \"xAI\"\nbase_url = \"https://api.x.ai/v1\"\n"
+            }),
+            None,
+        );
+        existing.category = Some("custom".to_string());
+        existing.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            ..Default::default()
+        });
+        state
+            .db
+            .save_provider("codex", &existing)
+            .expect("save managed xAI provider");
+        let original = serde_json::to_value(
+            state
+                .db
+                .get_provider_by_id("xai-managed", "codex")
+                .expect("query provider")
+                .expect("provider exists"),
+        )
+        .expect("serialize original provider");
+
+        let mut new_managed = existing.clone();
+        new_managed.id = "xai-managed-new".to_string();
+        let err = dispatch(
+            &state,
+            "add_provider",
+            json!({ "app": "codex", "provider": new_managed, "addToLive": false }),
+            false,
+        )
+        .await
+        .expect_err("WebUI must reject xAI OAuth creation");
+        assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+        assert!(state
+            .db
+            .get_provider_by_id("xai-managed-new", "codex")
+            .expect("query new provider")
+            .is_none());
+
+        let mut overwrite_without_meta = existing.clone();
+        overwrite_without_meta.name = "Attacker Replacement".to_string();
+        overwrite_without_meta.meta = None;
+        overwrite_without_meta.settings_config["auth"]["OPENAI_API_KEY"] = json!("attacker-key");
+        let err = dispatch(
+            &state,
+            "add_provider",
+            json!({
+                "app": "codex",
+                "provider": overwrite_without_meta,
+                "addToLive": false
+            }),
+            false,
+        )
+        .await
+        .expect_err("add UPSERT must not overwrite an existing xAI OAuth provider");
+        assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+
+        let mut stripped_update = existing.clone();
+        stripped_update.name = "Attacker Rename".to_string();
+        stripped_update.meta = None;
+        stripped_update.settings_config["auth"]["OPENAI_API_KEY"] = json!("attacker-key");
+        let err = dispatch(
+            &state,
+            "update_provider",
+            json!({
+                "app": "codex",
+                "provider": stripped_update,
+                "originalId": "xai-managed"
+            }),
+            false,
+        )
+        .await
+        .expect_err("stripping metadata must not bypass xAI OAuth update protection");
+        assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+
+        let err = dispatch(
+            &state,
+            "delete_provider",
+            json!({ "app": "codex", "id": "xai-managed" }),
+            false,
+        )
+        .await
+        .expect_err("WebUI must reject xAI OAuth deletion");
+        assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+
+        let err = dispatch(
+            &state,
+            "get_provider_for_edit",
+            json!({ "app": "codex", "id": "xai-managed" }),
+            false,
+        )
+        .await
+        .expect_err("WebUI must reject xAI OAuth edit details");
+        assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+
+        for (command, args) in [
+            (
+                "switch_provider",
+                json!({ "app": "codex", "id": "xai-managed" }),
+            ),
+            (
+                "remove_provider_from_live_config",
+                json!({ "app": "codex", "id": "xai-managed" }),
+            ),
+            (
+                "update_providers_sort_order",
+                json!({
+                    "app": "codex",
+                    "updates": [{ "id": "xai-managed", "sortIndex": 99 }]
+                }),
+            ),
+        ] {
+            let err = dispatch(&state, command, args, false)
+                .await
+                .expect_err("WebUI must reject xAI OAuth mutations");
+            assert!(err.contains("xAI OAuth") && err.contains("WebUI"), "{err}");
+        }
+
+        let stored = serde_json::to_value(
+            state
+                .db
+                .get_provider_by_id("xai-managed", "codex")
+                .expect("query unchanged provider")
+                .expect("managed provider remains"),
+        )
+        .expect("serialize stored provider");
+        assert_eq!(stored, original);
+    }
+
+    #[tokio::test]
+    async fn web_rpc_keeps_regular_xai_api_key_provider_editable() {
+        let (_dir, state) = temp_state();
+        let mut provider = Provider::with_id(
+            "xai-api-key".to_string(),
+            "xAI API Key".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "xai-form-key" },
+                "config": "model_provider = \"xai\"\n[model_providers.xai]\nname = \"xAI\"\nbase_url = \"https://api.x.ai/v1\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        state
+            .db
+            .save_provider("codex", &provider)
+            .expect("save API key provider");
+
+        let edit = dispatch(
+            &state,
+            "get_provider_for_edit",
+            json!({ "app": "codex", "id": "xai-api-key" }),
+            false,
+        )
+        .await
+        .expect("regular xAI API key provider remains editable");
+        assert_eq!(
+            edit.pointer("/settingsConfig/auth/OPENAI_API_KEY")
+                .and_then(Value::as_str),
+            Some("xai-form-key")
+        );
+
+        let mut updated: Provider =
+            serde_json::from_value(edit).expect("deserialize edit provider");
+        updated.name = "xAI API Key Renamed".to_string();
+        dispatch(
+            &state,
+            "update_provider",
+            json!({ "app": "codex", "provider": updated, "originalId": "xai-api-key" }),
+            false,
+        )
+        .await
+        .expect("update regular xAI API key provider");
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("xai-api-key", "codex")
+                .expect("query API key provider")
+                .expect("API key provider exists")
+                .name,
+            "xAI API Key Renamed"
+        );
+
+        dispatch(
+            &state,
+            "delete_provider",
+            json!({ "app": "codex", "id": "xai-api-key" }),
+            false,
+        )
+        .await
+        .expect("delete regular xAI API key provider");
+        assert!(state
+            .db
+            .get_provider_by_id("xai-api-key", "codex")
+            .expect("query deleted provider")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn codex_config_text_secrets_are_redacted_and_preserved() {
         let (_dir, state) = temp_state();
         let provider = Provider::with_id(
@@ -1572,6 +2599,67 @@ mod tests {
                 .pointer("/auth/OPENAI_API_KEY")
                 .and_then(Value::as_str),
             Some("sk-openai-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn toml_secret_placeholders_restore_by_structural_path() {
+        let (_dir, state) = temp_state();
+        let provider = Provider::with_id(
+            "toml-structural".to_string(),
+            "TOML Structural".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "provider-key" },
+                "config": "[first]\naccess_token = \"first-secret\"\n[second]\naccess_token = \"second-secret\"\n"
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider("codex", &provider)
+            .expect("save provider");
+
+        let providers = dispatch(&state, "get_providers", json!({ "app": "codex" }), false)
+            .await
+            .expect("get providers");
+        let mut redacted = providers
+            .get("toml-structural")
+            .cloned()
+            .expect("redacted provider");
+        redacted["name"] = json!("TOML Structural Renamed");
+        dispatch(
+            &state,
+            "update_provider",
+            json!({
+                "app": "codex",
+                "provider": redacted,
+                "originalId": "toml-structural"
+            }),
+            false,
+        )
+        .await
+        .expect("update provider");
+
+        let stored = state
+            .db
+            .get_provider_by_id("toml-structural", "codex")
+            .expect("load provider")
+            .expect("provider exists");
+        let config: toml::Value = toml::from_str(
+            stored
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("config text"),
+        )
+        .expect("stored TOML");
+        assert_eq!(
+            config["first"]["access_token"].as_str(),
+            Some("first-secret")
+        );
+        assert_eq!(
+            config["second"]["access_token"].as_str(),
+            Some("second-secret")
         );
     }
 }

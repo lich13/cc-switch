@@ -25,9 +25,11 @@ use super::{
     },
     ProxyError,
 };
-use crate::commands::{CodexOAuthState, CopilotAuthState};
+use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
+use crate::managed_auth::ManagedAuthManagers;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
+use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
     app_config::AppType,
     database::Database,
@@ -128,6 +130,8 @@ pub struct RequestForwarder {
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
     app_handle: Option<tauri::AppHandle>,
+    /// 无 AppHandle 时使用的 Web 托管认证状态。
+    managed_auth: ManagedAuthManagers,
     /// 请求开始时的"当前供应商 ID"（用于判断是否需要同步 UI/托盘）
     current_provider_id_at_start: String,
     /// 代理会话 ID（用于 Gemini Native shadow replay）
@@ -209,7 +213,8 @@ impl RequestForwarder {
         provider_body: &Value,
         error: &ProxyError,
     ) -> bool {
-        matches!(adapter_name, "Claude" | "Codex")
+        adapter_name == "Codex"
+            && matches!(app_type, AppType::Codex)
             && !already_retried
             && provider.supports_image_generation_policy(app_type)
             && match error {
@@ -270,6 +275,7 @@ impl RequestForwarder {
         codex_chat_history: Arc<CodexChatHistoryStore>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
+        managed_auth: ManagedAuthManagers,
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
@@ -293,6 +299,7 @@ impl RequestForwarder {
             codex_chat_history,
             failover_manager,
             app_handle,
+            managed_auth,
             current_provider_id_at_start,
             session_id,
             session_client_provided,
@@ -306,6 +313,22 @@ impl RequestForwarder {
             ),
             max_attempts,
         }
+    }
+
+    fn copilot_auth_manager(&self) -> Arc<RwLock<CopilotAuthManager>> {
+        self.app_handle
+            .as_ref()
+            .and_then(|handle| handle.try_state::<CopilotAuthState>())
+            .map(|state| state.0.clone())
+            .unwrap_or_else(|| self.managed_auth.copilot.clone())
+    }
+
+    fn codex_oauth_manager(&self) -> Arc<RwLock<CodexOAuthManager>> {
+        self.app_handle
+            .as_ref()
+            .and_then(|handle| handle.try_state::<CodexOAuthState>())
+            .map(|state| state.0.clone())
+            .unwrap_or_else(|| self.managed_auth.codex_oauth.clone())
     }
 
     async fn record_success_result(
@@ -1305,7 +1328,9 @@ impl RequestForwarder {
             .meta
             .as_ref()
             .and_then(|meta| meta.is_full_url)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !provider.is_codex_oauth()
+            && !provider.is_xai_oauth();
 
         // GitHub Copilot API 使用 /chat/completions（无 /v1 前缀）
         let is_copilot = provider
@@ -1318,9 +1343,9 @@ impl RequestForwarder {
         // Codex upstream conversion mode — computed early because the [1m]-suffix strip
         // below must be skipped on the Anthropic path (the marker has to survive to
         // catalog matching and to the transform's own strip+beta detection).
-        let codex_responses_to_chat = matches!(app_type, AppType::Codex)
+        let codex_responses_to_chat = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
-        let codex_responses_to_anthropic = matches!(app_type, AppType::Codex)
+        let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
             && super::providers::is_codex_official_provider(provider);
@@ -1343,6 +1368,13 @@ impl RequestForwarder {
 
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
+
+        // Grok Build exposes a stable client-side model profile in config.toml.
+        // Route requests to the provider's real upstream model before applying
+        // the optional Responses -> Chat/Anthropic bridge.
+        if matches!(app_type, AppType::GrokBuild) {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
 
         if is_copilot {
             mapped_body =
@@ -1463,30 +1495,28 @@ impl RequestForwarder {
         // GitHub Copilot 动态 endpoint 路由
         // 从 CopilotAuthManager 获取缓存的 API endpoint（支持企业版等非默认 endpoint）
         if is_copilot && !is_full_url {
-            if let Some(app_handle) = &self.app_handle {
-                let copilot_state = app_handle.state::<CopilotAuthState>();
-                let copilot_auth = copilot_state.0.read().await;
+            let copilot_manager = self.copilot_auth_manager();
+            let copilot_auth = copilot_manager.read().await;
 
-                // 从 provider.meta 获取关联的 GitHub 账号 ID
-                let account_id = provider
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.managed_account_id_for("github_copilot"));
+            // 从 provider.meta 获取关联的 GitHub 账号 ID
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.managed_account_id_for("github_copilot"));
 
-                let dynamic_endpoint = match &account_id {
-                    Some(id) => copilot_auth.get_api_endpoint(id).await,
-                    None => copilot_auth.get_default_api_endpoint().await,
-                };
+            let dynamic_endpoint = match &account_id {
+                Some(id) => copilot_auth.get_api_endpoint(id).await,
+                None => copilot_auth.get_default_api_endpoint().await,
+            };
 
-                // 只在动态 endpoint 与当前 base_url 不同时替换
-                if dynamic_endpoint != base_url {
-                    log::debug!(
-                        "[Copilot] 使用动态 API endpoint: {} (原: {})",
-                        dynamic_endpoint,
-                        base_url
-                    );
-                    base_url = dynamic_endpoint;
-                }
+            // 只在动态 endpoint 与当前 base_url 不同时替换
+            if dynamic_endpoint != base_url {
+                log::debug!(
+                    "[Copilot] 使用动态 API endpoint: {} (原: {})",
+                    dynamic_endpoint,
+                    base_url
+                );
+                base_url = dynamic_endpoint;
             }
         }
         let resolved_claude_api_format = if adapter.name() == "Claude" {
@@ -1576,11 +1606,13 @@ impl RequestForwarder {
             .filter(|m| !m.is_empty())
             .map(str::to_string);
 
-        if super::image_generation_policy::apply_image_generation_policy(
-            super::image_generation_policy::ImageGenerationPolicyMode::from_provider(provider),
-            &effective_endpoint,
-            &mut mapped_body,
-        ) {
+        if matches!(app_type, AppType::Codex)
+            && super::image_generation_policy::apply_image_generation_policy(
+                super::image_generation_policy::ImageGenerationPolicyMode::from_provider(provider),
+                &effective_endpoint,
+                &mut mapped_body,
+            )
+        {
             let app_type_str = app_type.as_str();
             log::info!(
                 "[{app_type_str}] Removed OpenAI image_generation tool before upstream request"
@@ -1698,7 +1730,49 @@ impl RequestForwarder {
             mapped_body
         };
 
-        if matches!(app_type, AppType::Codex) {
+        // Native Responses passthrough to a strict third-party gateway (xAI):
+        // flatten Codex's private `namespace`/plugin tool declarations into
+        // top-level function tools so the upstream's strict serde parser does
+        // not 422 on `unknown variant "namespace"`. The Chat/Anthropic paths
+        // above already unwrap namespaces, so this only fires on the native
+        // passthrough. The response handler restores the flat names using a map
+        // re-derived from the same request tools.
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && super::providers::provider_needs_responses_namespace_flatten(provider)
+            && super::providers::transform_codex_responses_namespace::flatten_request_namespaces(
+                &mut request_body,
+            )?
+        {
+            log::debug!(
+                "[Codex] Flattened namespace tools for native Responses upstream (provider={})",
+                provider.id
+            );
+        }
+
+        // Same native-Responses path: scrub the OpenAI-backend-private fields
+        // and tool carriers (`external_web_access`, `prompt_cache_retention`,
+        // `additional_tools`, `tool_search`, …) that xAI's strict serde parser
+        // rejects with 400/422. Deterministic field removals only, gated on the
+        // xAI OAuth path, so the prompt-cache prefix stays stable and no other
+        // provider is affected. Runs after the flatten above so lifted
+        // `namespace` tools survive the tool-type whitelist.
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+            && super::providers::provider_needs_responses_namespace_flatten(provider)
+            && super::providers::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
+                &mut request_body,
+            )
+        {
+            log::debug!(
+                "[Codex] Sanitized xAI-unsupported Responses fields (provider={})",
+                provider.id
+            );
+        }
+
+        if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
             self.apply_media_prevention(&mut request_body, provider);
         }
 
@@ -1743,109 +1817,137 @@ impl RequestForwarder {
         let mut codex_oauth_account_id: Option<String> = None;
         let mut should_send_codex_oauth_session_headers = false;
 
-        // 获取认证头（提前准备，用于内联替换）
+        // 获取认证头（提前准备，用于内联替换），同时保留仅用于日志脱敏的
+        // 精确认证材料。实际日志永远不输出这些值。
+        let mut log_secrets: Vec<String> = Vec::new();
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
-                if let Some(app_handle) = &self.app_handle {
-                    let copilot_state = app_handle.state::<CopilotAuthState>();
-                    let copilot_auth: tokio::sync::RwLockReadGuard<'_, CopilotAuthManager> =
-                        copilot_state.0.read().await;
+                let copilot_manager = self.copilot_auth_manager();
+                let copilot_auth = copilot_manager.read().await;
 
-                    // 从 provider.meta 获取关联的 GitHub 账号 ID（多账号支持）
-                    let account_id = provider
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.managed_account_id_for("github_copilot"));
+                // 从 provider.meta 获取关联的 GitHub 账号 ID（多账号支持）
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.managed_account_id_for("github_copilot"));
 
-                    // 根据账号 ID 获取对应 token（向后兼容：无账号 ID 时使用第一个账号）
-                    let token_result = match &account_id {
-                        Some(id) => {
-                            log::debug!("[Copilot] 使用指定账号 {id} 获取 token");
-                            copilot_auth.get_valid_token_for_account(id).await
-                        }
-                        None => {
-                            log::debug!("[Copilot] 使用默认账号获取 token");
-                            copilot_auth.get_valid_token().await
-                        }
-                    };
-
-                    match token_result {
-                        Ok(token) => {
-                            auth = AuthInfo::new(token, AuthStrategy::GitHubCopilot);
-                            log::debug!(
-                                "[Copilot] 成功获取 Copilot token (account={})",
-                                account_id.as_deref().unwrap_or("default")
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "[Copilot] 获取 Copilot token 失败 (account={}): {e}",
-                                account_id.as_deref().unwrap_or("default")
-                            );
-                            return Err(ProxyError::AuthError(format!(
-                                "GitHub Copilot 认证失败: {e}"
-                            )));
-                        }
+                // 根据账号 ID 获取对应 token（向后兼容：无账号 ID 时使用第一个账号）
+                let token_result = match &account_id {
+                    Some(id) => {
+                        log::debug!("[Copilot] 使用指定账号 {id} 获取 token");
+                        copilot_auth.get_valid_token_for_account(id).await
                     }
-                } else {
-                    log::error!("[Copilot] AppHandle 不可用");
-                    return Err(ProxyError::AuthError(
-                        "GitHub Copilot 认证不可用（无 AppHandle）".to_string(),
-                    ));
+                    None => {
+                        log::debug!("[Copilot] 使用默认账号获取 token");
+                        copilot_auth.get_valid_token().await
+                    }
+                };
+
+                match token_result {
+                    Ok(token) => {
+                        auth = AuthInfo::new(token, AuthStrategy::GitHubCopilot);
+                        log::debug!(
+                            "[Copilot] 成功获取 Copilot token (account={})",
+                            account_id.as_deref().unwrap_or("default")
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[Copilot] 获取 Copilot token 失败 (account={}): {e}",
+                            account_id.as_deref().unwrap_or("default")
+                        );
+                        return Err(ProxyError::AuthError(format!(
+                            "GitHub Copilot 认证失败: {e}"
+                        )));
+                    }
                 }
             }
 
             // Codex OAuth 特殊处理：从 CodexOAuthManager 获取真实 access_token
             if auth.strategy == AuthStrategy::CodexOAuth {
-                if let Some(app_handle) = &self.app_handle {
-                    let codex_state = app_handle.state::<CodexOAuthState>();
-                    let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
-                        codex_state.0.read().await;
+                let codex_manager = self.codex_oauth_manager();
+                let codex_auth = codex_manager.read().await;
 
-                    // 从 provider.meta 获取关联的 ChatGPT 账号 ID
+                // 从 provider.meta 获取关联的 ChatGPT 账号 ID
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.managed_account_id_for("codex_oauth"));
+
+                let token_result = match &account_id {
+                    Some(id) => {
+                        log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
+                        codex_auth.get_valid_token_for_account(id).await
+                    }
+                    None => {
+                        log::debug!("[CodexOAuth] 使用默认账号获取 token");
+                        codex_auth.get_valid_token().await
+                    }
+                };
+
+                match token_result {
+                    Ok(token) => {
+                        auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
+                        should_send_codex_oauth_session_headers = true;
+                        // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
+                        codex_oauth_account_id = match account_id {
+                            Some(id) => Some(id),
+                            None => codex_auth.default_account_id().await,
+                        };
+                        log::debug!(
+                            "[CodexOAuth] 成功获取 access_token (account={})",
+                            codex_oauth_account_id.as_deref().unwrap_or("default")
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
+                        return Err(ProxyError::AuthError(format!("Codex OAuth 认证失败: {e}")));
+                    }
+                }
+            }
+
+            // xAI OAuth: resolve a managed account token immediately before
+            // sending the request. Invalid refresh credentials are persisted as
+            // requiring re-authentication by the manager.
+            if auth.strategy == AuthStrategy::XaiOAuth {
+                if let Some(app_handle) = &self.app_handle {
+                    let xai_state = app_handle.state::<XaiOAuthState>();
+                    let xai_auth: tokio::sync::RwLockReadGuard<'_, XaiOAuthManager> =
+                        xai_state.0.read().await;
                     let account_id = provider
                         .meta
                         .as_ref()
-                        .and_then(|m| m.managed_account_id_for("codex_oauth"));
-
+                        .and_then(|meta| meta.managed_account_id_for("xai_oauth"));
                     let token_result = match &account_id {
-                        Some(id) => {
-                            log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
-                            codex_auth.get_valid_token_for_account(id).await
-                        }
-                        None => {
-                            log::debug!("[CodexOAuth] 使用默认账号获取 token");
-                            codex_auth.get_valid_token().await
-                        }
+                        Some(id) => xai_auth.get_valid_token_for_account(id).await,
+                        None => xai_auth.get_valid_token().await,
                     };
-
                     match token_result {
                         Ok(token) => {
-                            auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
-                            should_send_codex_oauth_session_headers = true;
-                            // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
-                            };
+                            auth = AuthInfo::new(token, AuthStrategy::XaiOAuth);
                             log::debug!(
-                                "[CodexOAuth] 成功获取 access_token (account={})",
-                                codex_oauth_account_id.as_deref().unwrap_or("default")
+                                "[XaiOAuth] 成功获取 access_token (account={})",
+                                account_id.as_deref().unwrap_or("default")
                             );
                         }
-                        Err(e) => {
-                            log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
+                        Err(error) => {
+                            log::error!("[XaiOAuth] 获取 access_token 失败: {error}");
                             return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {e}"
+                                "xAI OAuth 认证失败: {error}"
                             )));
                         }
                     }
                 } else {
-                    log::error!("[CodexOAuth] AppHandle 不可用");
                     return Err(ProxyError::AuthError(
-                        "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
+                        "xAI OAuth 认证不可用（无 AppHandle）".to_string(),
                     ));
+                }
+            }
+
+            for secret in std::iter::once(&auth.api_key).chain(auth.access_token.iter()) {
+                if !secret.is_empty() && !log_secrets.contains(secret) {
+                    log_secrets.push(secret.clone());
                 }
             }
 
@@ -2263,22 +2365,29 @@ impl RequestForwarder {
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
+        // 日志目标 URL 的脱敏分两种情形：
+        // - 有已知密钥(log_secrets 非空)：记录脱敏后的完整 URL，剥 userinfo/query
+        //   并抹掉已知密钥值，保留 host+path 便于诊断 base_url 配错路径导致的 404。
+        // - 无已知密钥：凭据可能整个内嵌在 path 里且无从脱敏，只记 origin，
+        //   避免默认 Info 级把形如 https://gw/<KEY>/v1 的 path 完整落盘。
+        let target_for_log = if log_secrets.is_empty() {
+            crate::redact_url_origin_for_log(&url)
+        } else {
+            crate::redact_url_for_log_with_secrets(&url, &log_secrets)
+        };
+
         // 输出请求信息日志
         let tag = adapter.name();
         let request_model = filtered_body
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
-        log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
-        if log::log_enabled!(log::Level::Debug) {
-            if let Ok(body_str) = serde_json::to_string(&filtered_body) {
-                log::debug!(
-                    "[{tag}] >>> 请求体内容 ({}字节): {}",
-                    body_str.len(),
-                    body_str
-                );
-            }
-        }
+        log::info!("[{tag}] >>> 请求目标: {target_for_log} (model={request_model})");
+        log::debug!(
+            "[{tag}] >>> 请求体已准备: bytes={}, hash={} (content omitted)",
+            body_bytes.len(),
+            short_value_hash(Some(&filtered_body))
+        );
 
         // 确定超时
         let timeout = if self.non_streaming_timeout.is_zero() {
@@ -2345,11 +2454,12 @@ impl RequestForwarder {
         } else {
             // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
             // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
-            let uri: http::Uri = url
-                .parse()
-                .map_err(|e| ProxyError::ForwardFailed(format!("Invalid URL '{url}': {e}")))?;
+            let uri: http::Uri = url.parse().map_err(|e| {
+                ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
+            })?;
             super::hyper_client::send_request(
                 uri,
+                &target_for_log,
                 method.clone(),
                 ordered_headers,
                 extensions.clone(),
@@ -2653,11 +2763,8 @@ impl RequestForwarder {
         };
         let model_id = model_id.to_string();
 
-        let Some(app_handle) = &self.app_handle else {
-            return;
-        };
-        let copilot_state = app_handle.state::<CopilotAuthState>();
-        let copilot_auth = copilot_state.0.read().await;
+        let copilot_manager = self.copilot_auth_manager();
+        let copilot_auth = copilot_manager.read().await;
         let account_id = provider
             .meta
             .as_ref()
@@ -2685,13 +2792,8 @@ impl RequestForwarder {
     }
 
     async fn is_copilot_openai_vendor_model(&self, provider: &Provider, model_id: &str) -> bool {
-        let Some(app_handle) = &self.app_handle else {
-            log::debug!("[Copilot] AppHandle unavailable, fallback to chat/completions");
-            return false;
-        };
-
-        let copilot_state = app_handle.state::<CopilotAuthState>();
-        let copilot_auth = copilot_state.0.read().await;
+        let copilot_manager = self.copilot_auth_manager();
+        let copilot_auth = copilot_manager.read().await;
         let account_id = provider
             .meta
             .as_ref()
@@ -2737,6 +2839,14 @@ impl RequestForwarder {
                     }
                 ))
         {
+            return ErrorCategory::NonRetryable;
+        }
+
+        // xAI OAuth mirrors the same rule for token acquisition: a local
+        // AuthError means the managed account needs re-login. Failing over
+        // would silently move the conversation off the selected Grok account
+        // and poison the provider's health state for an account-level issue.
+        if provider.is_xai_oauth() && matches!(error, ProxyError::AuthError(_)) {
             return ErrorCategory::NonRetryable;
         }
 
@@ -3299,11 +3409,7 @@ fn rewrite_user_agent_for_app(
         return None;
     }
 
-    match app_type {
-        AppType::Claude => Some(config.claude_target.trim().to_string()),
-        AppType::Codex => Some(config.codex_target.trim().to_string()),
-        _ => None,
-    }
+    matches!(app_type, AppType::Codex).then(|| config.codex_target.trim().to_string())
 }
 
 fn append_rewritten_user_agent_if_matched(
@@ -3356,6 +3462,7 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
     host == "githubcopilot.com"
         || host.ends_with(".githubcopilot.com")
         || (host == "chatgpt.com" && uri.path().starts_with("/backend-api/codex"))
+        || (host == "api.x.ai" && uri.path().starts_with("/v1/"))
 }
 
 fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
@@ -3377,7 +3484,7 @@ fn should_preserve_exact_header_case(
         return false;
     }
 
-    if is_copilot || provider.is_codex_oauth() {
+    if is_copilot || provider.is_codex_oauth() || provider.is_xai_oauth() {
         return false;
     }
 
@@ -3415,11 +3522,11 @@ fn should_force_identity_encoding(
 
 fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
     if error.is_timeout() {
-        ProxyError::Timeout(format!("请求超时: {error}"))
+        ProxyError::Timeout(format!("上游请求超时: {}", error.without_url()))
     } else if error.is_connect() {
-        ProxyError::ForwardFailed(format!("连接失败: {error}"))
+        ProxyError::ForwardFailed(format!("上游连接失败: {}", error.without_url()))
     } else {
-        ProxyError::ForwardFailed(error.to_string())
+        ProxyError::ForwardFailed(format!("上游请求发送失败: {}", error.without_url()))
     }
 }
 
@@ -3619,7 +3726,8 @@ fn log_prompt_cache_trace(
         "[CacheTrace] app={}, provider={}, endpoint={}, api_format={}, session_client_provided={}, prompt_cache_key={}, store={}, stream={}, instructions_hash={}, system_hash={}, tools_hash={}, input_hash={}, messages_hash={}, include_hash={}, cache_controls={}, body_hash={}",
         app_type.as_str(),
         provider.id,
-        endpoint,
+        // Gemini 的 endpoint 带 ?key=<API_KEY>；脱敏剥掉 query 再落盘。
+        crate::redact_url_for_log(endpoint),
         api_format.unwrap_or("native"),
         session_client_provided,
         prompt_cache_key,
@@ -3732,8 +3840,9 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
-            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db.clone())),
             app_handle: None,
+            managed_auth: ManagedAuthManagers::from_database(&db),
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -3759,8 +3868,9 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
-            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db.clone())),
             app_handle: None,
+            managed_auth: ManagedAuthManagers::from_database(&db),
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
@@ -3772,6 +3882,20 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[test]
+    fn headless_forwarder_uses_web_managed_auth_managers() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+
+        assert!(Arc::ptr_eq(
+            &forwarder.copilot_auth_manager(),
+            &forwarder.managed_auth.copilot
+        ));
+        assert!(Arc::ptr_eq(
+            &forwarder.codex_oauth_manager(),
+            &forwarder.managed_auth.codex_oauth
+        ));
     }
 
     async fn read_test_http_request(stream: &mut tokio::net::TcpStream) -> (String, Value) {
@@ -3902,6 +4026,7 @@ mod tests {
         assert_eq!(code, log_fwd::SINGLE_PROVIDER_FAILED);
         assert!(message.contains("Provider PackyCode-response 请求失败"));
         assert!(message.contains("上游 HTTP 429"));
+        // 上游错误消息保留(截断)，用于诊断失败原因。
         assert!(message.contains("rate limit exceeded"));
         assert!(!message.contains("切换下一个"));
     }
@@ -3932,20 +4057,6 @@ mod tests {
         assert_eq!(code, log_fwd::ALL_PROVIDERS_FAILED);
         assert!(message.contains("已尝试 2/2 个 Provider，均失败"));
         assert!(message.contains("connection reset by peer"));
-    }
-
-    #[test]
-    fn summarize_upstream_body_prefers_json_message() {
-        let body = json!({
-            "error": {
-                "message": "invalid_request_error: unsupported field"
-            },
-            "request_id": "req_123"
-        });
-
-        let summary = summarize_upstream_body(&body.to_string());
-
-        assert_eq!(summary, "invalid_request_error: unsupported field");
     }
 
     #[test]
@@ -4642,6 +4753,18 @@ mod tests {
                 &target_error,
             )
         );
+        assert!(
+            !RequestForwarder::image_generation_policy_retry_should_trigger(
+                "Claude",
+                &AppType::Claude,
+                &provider,
+                "/v1/responses",
+                false,
+                &body,
+                &target_error,
+            ),
+            "Claude must not enter the Codex-only image-generation policy path"
+        );
 
         let other_403 = ProxyError::UpstreamError {
             status: 403,
@@ -4778,6 +4901,16 @@ mod tests {
             err,
             ProxyError::AuthError(message) if message.contains("PROXY_MANAGED")
         ));
+
+        let xai_err = reject_proxy_placeholder_for_managed_account_upstream(
+            "https://api.x.ai/v1/responses",
+            &headers,
+        )
+        .expect_err("xAI placeholder should be rejected before upstream");
+        assert!(matches!(
+            xai_err,
+            ProxyError::AuthError(message) if message.contains("PROXY_MANAGED")
+        ));
     }
 
     #[test]
@@ -4816,16 +4949,15 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_rewrite_replaces_default_openai_python_for_claude_and_codex() {
+    fn user_agent_rewrite_replaces_default_openai_python_only_for_codex() {
         let config = UserAgentRewriteConfig {
-            claude_target: "claude-custom/1.0".to_string(),
             codex_target: "codex-custom/2.0".to_string(),
             ..UserAgentRewriteConfig::default()
         };
 
         assert_eq!(
             rewrite_user_agent_for_app(&AppType::Claude, "OpenAI/Python 2.24.0", &config),
-            Some("claude-custom/1.0".to_string())
+            None
         );
         assert_eq!(
             rewrite_user_agent_for_app(&AppType::Codex, "OpenAI/Python 2.999.10", &config),
@@ -4834,72 +4966,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_agent_rewrite_forwarding_overrides_provider_custom_user_agent_for_claude() {
-        let config = UserAgentRewriteConfig {
-            claude_target: "claude_target".to_string(),
-            codex_target: "codex_target".to_string(),
-            ..UserAgentRewriteConfig::default()
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::USER_AGENT,
-            HeaderValue::from_static("OpenAI/Python 2.24.0"),
-        );
-
-        let outbound_headers = capture_forwarded_headers(
-            AppType::Claude,
-            |upstream_addr| {
-                let mut provider = Provider::with_id(
-                    "claude-custom".to_string(),
-                    "Claude Custom".to_string(),
-                    json!({
-                        "env": {
-                            "ANTHROPIC_BASE_URL": format!("http://{upstream_addr}/v1"),
-                            "ANTHROPIC_API_KEY": "sk-test"
-                        }
-                    }),
-                    None,
-                );
-                provider.category = Some("custom".to_string());
-                provider.meta = Some(crate::provider::ProviderMeta {
-                    api_format: Some("anthropic".to_string()),
-                    custom_user_agent: Some("provider-custom/9.9".to_string()),
-                    ..Default::default()
-                });
-                provider
-            },
-            "/v1/messages",
-            json!({
-                "model": "claude-3-5-sonnet-latest",
-                "max_tokens": 16,
-                "messages": [{ "role": "user", "content": "hello" }]
-            }),
-            headers,
-            config,
-            r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet-latest","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
-        )
-        .await;
-
-        let user_agents = user_agent_header_values(&outbound_headers);
-        assert_eq!(user_agents, vec!["claude_target".to_string()]);
-        assert!(
-            !user_agents
-                .iter()
-                .any(|value| value == "OpenAI/Python 2.24.0"),
-            "matched client User-Agent must not leak upstream"
-        );
-        assert!(
-            !user_agents
-                .iter()
-                .any(|value| value == "provider-custom/9.9"),
-            "global rewrite must win over provider custom User-Agent"
-        );
-    }
-
-    #[tokio::test]
     async fn user_agent_rewrite_forwarding_overrides_provider_custom_user_agent_for_codex() {
         let config = UserAgentRewriteConfig {
-            claude_target: "claude_target".to_string(),
             codex_target: "codex_target".to_string(),
             ..UserAgentRewriteConfig::default()
         };
@@ -4995,7 +5063,7 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_rewrite_does_not_apply_to_claude_desktop_or_non_matching_values() {
+    fn user_agent_rewrite_does_not_apply_to_claude_or_claude_desktop() {
         let config = UserAgentRewriteConfig::default();
 
         assert_eq!(
@@ -5003,7 +5071,7 @@ mod tests {
             None
         );
         assert_eq!(
-            rewrite_user_agent_for_app(&AppType::Claude, "claude-cli/2.1.173", &config),
+            rewrite_user_agent_for_app(&AppType::Claude, "OpenAI/Python 2.24.0", &config),
             None
         );
     }
@@ -5018,12 +5086,12 @@ mod tests {
             &mut rewritten_headers,
             &key,
             &HeaderValue::from_static("OpenAI/Python 2.24.0"),
-            &AppType::Claude,
+            &AppType::Codex,
             &config,
         ));
         assert_eq!(
             rewritten_headers.get(http::header::USER_AGENT),
-            Some(&HeaderValue::from_str(&config.claude_target).unwrap())
+            Some(&HeaderValue::from_str(&config.codex_target).unwrap())
         );
 
         let mut non_matching_headers = HeaderMap::new();
@@ -5031,7 +5099,7 @@ mod tests {
             &mut non_matching_headers,
             &key,
             &HeaderValue::from_static("curl/8.7.1"),
-            &AppType::Claude,
+            &AppType::Codex,
             &config,
         ));
         assert!(
@@ -5394,6 +5462,32 @@ mod tests {
                 ErrorCategory::NonRetryable
             );
         }
+    }
+
+    #[test]
+    fn xai_oauth_token_auth_failures_are_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let provider = test_provider_with_type(Some("xai_oauth"));
+
+        // 本地取 token 失败 = 账号级问题（需重新登录），failover 无济于事
+        assert_eq!(
+            forwarder.categorize_proxy_error(
+                &ProxyError::AuthError("xAI OAuth 认证失败".to_string()),
+                &provider,
+            ),
+            ErrorCategory::NonRetryable
+        );
+        // 上游 401/403 保持 Retryable：换 provider 可能持有可用的 key
+        assert_eq!(
+            forwarder.categorize_proxy_error(
+                &ProxyError::UpstreamError {
+                    status: 401,
+                    body: None,
+                },
+                &provider,
+            ),
+            ErrorCategory::Retryable
+        );
     }
 
     #[test]

@@ -14,21 +14,27 @@ import UsageFooter from "@/components/UsageFooter";
 import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
-import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
+import {
+  isOAuthProviderType,
+  PROVIDER_TYPES,
+  TEMPLATE_TYPES,
+} from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
-  extractCodexWireApi,
-  isCodexAnthropicWireApi,
-  isCodexChatWireApi,
 } from "@/utils/providerConfigUtils";
-import { supportsOfficialProxyTakeover } from "@/utils/providerCapabilities";
+import {
+  supportsOfficialProxyTakeover,
+  providerNeedsRouting,
+} from "@/utils/providerCapabilities";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { Switch } from "@/components/ui/switch";
+import { resolveProviderIcon } from "@/utils/providerIcon";
+import { isWebRuntime } from "@/lib/runtime";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -114,30 +120,10 @@ function providerSupportsImageGenerationPolicy(
   if (provider.category === "official") {
     return false;
   }
-  if (
-    provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH ||
-    provider.meta?.providerType === PROVIDER_TYPES.GITHUB_COPILOT
-  ) {
+  if (isOAuthProviderType(provider.meta?.providerType)) {
     return false;
   }
-
-  if (appId === "codex") {
-    return true;
-  }
-  if (
-    appId === "claude-desktop" &&
-    provider.meta?.claudeDesktopMode !== "proxy"
-  ) {
-    return false;
-  }
-  if (appId === "claude" || appId === "claude-desktop") {
-    const apiFormat =
-      provider.meta?.apiFormat ??
-      (provider.settingsConfig as Record<string, any>)?.api_format;
-    return apiFormat === "openai_chat" || apiFormat === "openai_responses";
-  }
-
-  return false;
+  return appId === "codex";
 }
 
 const extractApiUrl = (provider: Provider, fallbackText: string) => {
@@ -265,25 +251,10 @@ export function ProviderCard({
     appId === "hermes" && isHermesReadOnlyProvider(provider.settingsConfig);
   const isCodexOauth =
     provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
-  const codexNeedsRouting = useMemo(() => {
-    if (appId !== "codex" || provider.category === "official") return false;
-    if (
-      provider.meta?.apiFormat === "openai_chat" ||
-      provider.meta?.apiFormat === "anthropic"
-    )
-      return true;
-    const config = (provider.settingsConfig as Record<string, any>)?.config;
-    return (
-      typeof config === "string" &&
-      (isCodexChatWireApi(extractCodexWireApi(config)) ||
-        isCodexAnthropicWireApi(extractCodexWireApi(config)))
-    );
-  }, [
-    appId,
-    provider.category,
-    provider.meta?.apiFormat,
-    (provider.settingsConfig as Record<string, any>)?.config,
-  ]);
+  // 统一权威谓词（详见 providerNeedsRouting）：以 providerType 为准，不受
+  // apiFormat 被改动/缺省影响。此 badge 仅在 Codex 视图渲染，故加 appId 守卫。
+  const codexNeedsRouting =
+    appId === "codex" && providerNeedsRouting(appId, provider);
   const supportsImageGenerationPolicy = providerSupportsImageGenerationPolicy(
     provider,
     appId,
@@ -291,6 +262,8 @@ export function ProviderCard({
   const imageGenerationPolicyEnabled =
     provider.meta?.disableImageGeneration === true ||
     provider.meta?.disableImageGeneration === "chat";
+  const hideManagedXaiWebActions =
+    isWebRuntime() && provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
 
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
@@ -397,7 +370,11 @@ export function ProviderCard({
 
           <div className="h-8 w-8 flex-shrink-0 rounded-lg bg-muted flex items-center justify-center border border-border group-hover:scale-105 transition-transform duration-300">
             <ProviderIcon
-              icon={provider.icon}
+              icon={resolveProviderIcon(
+                appId,
+                provider.icon,
+                provider.iconColor,
+              )}
               name={provider.name}
               color={provider.iconColor}
               size={20}
@@ -423,8 +400,7 @@ export function ProviderCard({
               )}
 
               {appId === "claude-desktop" &&
-                provider.category !== "official" &&
-                provider.meta?.claudeDesktopMode === "proxy" && (
+                providerNeedsRouting(appId, provider) && (
                   <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                     {t("claudeDesktop.modeProxy", {
                       defaultValue: "需要路由",
@@ -432,16 +408,13 @@ export function ProviderCard({
                   </span>
                 )}
 
-              {appId === "claude" &&
-                provider.category !== "official" &&
-                provider.meta?.apiFormat &&
-                provider.meta.apiFormat !== "anthropic" && (
-                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                    {t("claudeCode.needsRouting", {
-                      defaultValue: "需要路由",
-                    })}
-                  </span>
-                )}
+              {appId === "claude" && providerNeedsRouting(appId, provider) && (
+                <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                  {t("claudeCode.needsRouting", {
+                    defaultValue: "需要路由",
+                  })}
+                </span>
+              )}
 
               {codexNeedsRouting && (
                 <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
@@ -635,8 +608,14 @@ export function ProviderCard({
               isReadOnly={isHermesReadOnly}
               isOmo={isAnyOmo}
               onSwitch={() => onSwitch(provider)}
-              onEdit={() => onEdit(provider)}
-              onDuplicate={() => onDuplicate(provider)}
+              onEdit={
+                hideManagedXaiWebActions ? undefined : () => onEdit(provider)
+              }
+              onDuplicate={
+                hideManagedXaiWebActions
+                  ? undefined
+                  : () => onDuplicate(provider)
+              }
               onTest={
                 // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的
                 // 真实请求探测会误报、而可达性探测能正确处理的对象）。官方供应商

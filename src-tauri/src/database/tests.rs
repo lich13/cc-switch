@@ -834,6 +834,38 @@ fn providers_json_file_import_creates_database_backup_before_replace() {
 }
 
 #[test]
+fn deleted_default_skill_repo_is_not_restored() {
+    let db = Database::memory().expect("create memory db");
+
+    assert_eq!(db.init_default_skill_repos().expect("initialize repos"), 4);
+    for repo in db.get_skill_repos().expect("get initialized repos") {
+        db.delete_skill_repo(&repo.owner, &repo.name)
+            .expect("delete repo");
+    }
+    assert!(db.get_skill_repos().expect("get deleted repos").is_empty());
+
+    assert_eq!(
+        db.init_default_skill_repos().expect("reinitialize repos"),
+        0
+    );
+    assert!(db.get_skill_repos().expect("get repos").is_empty());
+}
+
+#[test]
+fn existing_skill_repo_selection_is_not_supplemented() {
+    let db = Database::memory().expect("create memory db");
+    let default_store = crate::services::skill::SkillStore::default();
+    db.save_skill_repo(&default_store.repos[0])
+        .expect("save existing repo");
+
+    assert_eq!(db.init_default_skill_repos().expect("initialize repos"), 0);
+    assert_eq!(db.get_skill_repos().expect("get repos").len(), 1);
+    assert!(db
+        .get_bool_flag("default_skill_repos_initialized")
+        .expect("get initialized flag"));
+}
+
+#[test]
 fn schema_migration_sets_user_version_when_missing() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
@@ -848,6 +880,48 @@ fn schema_migration_sets_user_version_when_missing() {
     assert_eq!(
         Database::get_user_version(&conn).expect("read version after"),
         SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn webd_database_init_preserves_old_proxy_request_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("cc-switch.db");
+    let db = Database::init_at(&db_path).expect("initialize database");
+    let old_created_at = chrono::Utc::now().timestamp() - 45 * 24 * 60 * 60;
+
+    {
+        let conn = db.conn.lock().expect("lock database");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, latency_ms,
+                status_code, created_at, data_source
+             ) VALUES ('old-proxy-detail', 'provider', 'codex', 'gpt-test', 1, 200, ?1, 'proxy')",
+            [old_created_at],
+        )
+        .expect("insert old proxy detail");
+    }
+    drop(db);
+
+    let reopened = Database::init_at_for_webd(&db_path).expect("reopen webd database");
+    assert_eq!(
+        scalar_count(
+            &reopened,
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'old-proxy-detail'",
+        ),
+        1,
+        "webd startup must not prune proxy request details",
+    );
+    drop(reopened);
+
+    let desktop_reopened = Database::init_at(&db_path).expect("reopen desktop database");
+    assert_eq!(
+        scalar_count(
+            &desktop_reopened,
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'old-proxy-detail'",
+        ),
+        0,
+        "desktop startup must retain the official usage rollup policy",
     );
 }
 
@@ -1199,7 +1273,7 @@ fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
     let count: i32 = conn
         .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
         .expect("count rows");
-    assert_eq!(count, 3, "per-app proxy_config should have 3 rows");
+    assert_eq!(count, 4, "per-app proxy_config should have 4 rows");
 
     // 新结构下应能按 app_type 查询
     let _: i32 = conn
@@ -1339,7 +1413,7 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
     let proxy_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
         .expect("count proxy_config rows");
-    assert_eq!(proxy_rows, 3);
+    assert_eq!(proxy_rows, 4);
 
     // model_pricing 应具备默认数据（迁移时会 seed）
     let pricing_rows: i64 = conn
@@ -1596,11 +1670,11 @@ fn user_agent_rewrite_config_defaults_and_rejects_invalid_regex() {
 }
 
 #[test]
-fn user_agent_rewrite_config_backfills_targets_from_legacy_setting_json() {
+fn user_agent_rewrite_config_drops_legacy_claude_target_on_save() {
     let db = Database::memory().expect("create memory db");
     db.set_setting(
         "user_agent_rewrite_config",
-        r#"{"enabled":true,"rules":[{"enabled":true,"pattern":"^Legacy/.*$"}]}"#,
+        r#"{"enabled":true,"claudeTarget":"legacy-claude/1.0","codexTarget":"codex-custom/2.0","rules":[{"enabled":true,"pattern":"^Legacy/.*$"}]}"#,
     )
     .expect("seed legacy user-agent rewrite config");
 
@@ -1608,13 +1682,15 @@ fn user_agent_rewrite_config_backfills_targets_from_legacy_setting_json() {
         .get_user_agent_rewrite_config()
         .expect("legacy user agent rewrite config");
 
-    assert_eq!(
-        config.claude_target,
-        crate::proxy::types::default_claude_user_agent_rewrite_target()
-    );
-    assert_eq!(
-        config.codex_target,
-        crate::proxy::types::default_codex_user_agent_rewrite_target()
-    );
+    assert_eq!(config.codex_target, "codex-custom/2.0");
     assert!(config.matches("Legacy/1.0"));
+
+    db.set_user_agent_rewrite_config(&config)
+        .expect("save normalized rewrite config");
+    let saved = db
+        .get_setting("user_agent_rewrite_config")
+        .expect("read normalized setting")
+        .expect("rewrite setting exists");
+    assert!(!saved.contains("claudeTarget"));
+    assert!(!saved.contains("legacy-claude/1.0"));
 }

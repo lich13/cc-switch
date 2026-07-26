@@ -25,7 +25,6 @@ vi.mock("@/lib/api/settings", () => ({
 
 const baseRewriteConfig: UserAgentRewriteConfig = {
   enabled: true,
-  claudeTarget: "claude-cli/test",
   codexTarget: "codex-tui/test",
   rules: [{ enabled: true, pattern: "^OpenAI/Python .*$" }],
 };
@@ -64,7 +63,6 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
   it("preserves an intentionally empty regex list when saving", async () => {
     mockPanelConfig({
       enabled: true,
-      claudeTarget: "claude-cli/empty",
       codexTarget: "codex-tui/empty",
       rules: [],
     });
@@ -80,17 +78,15 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenCalledWith({
         enabled: true,
-        claudeTarget: "claude-cli/empty",
         codexTarget: "codex-tui/empty",
         rules: [],
       });
     });
   });
 
-  it("saves editable targets and per-rule enabled state", async () => {
+  it("saves the editable Codex target and per-rule enabled state", async () => {
     mockPanelConfig({
       enabled: true,
-      claudeTarget: "claude-cli/old",
       codexTarget: "codex-tui/old",
       rules: [
         { enabled: true, pattern: "^OpenAI/Python .*$" },
@@ -102,12 +98,8 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
 
     fireEvent.change(
       await screen.findByLabelText(
-        "settings.advanced.userAgentRewrite.claudeTarget",
+        "settings.advanced.userAgentRewrite.codexTarget",
       ),
-      { target: { value: " claude-cli/new " } },
-    );
-    fireEvent.change(
-      screen.getByLabelText("settings.advanced.userAgentRewrite.codexTarget"),
       { target: { value: " codex-tui/new " } },
     );
 
@@ -141,7 +133,6 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenCalledWith({
         enabled: true,
-        claudeTarget: "claude-cli/new",
         codexTarget: "codex-tui/new",
         rules: [
           { enabled: false, pattern: "^OpenAI/Python .*$" },
@@ -151,10 +142,9 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     });
   });
 
-  it("only persists enabled when toggled and keeps staged targets and rules for explicit save", async () => {
+  it("only persists enabled when toggled and keeps the staged target and rules for explicit save", async () => {
     mockPanelConfig({
       enabled: false,
-      claudeTarget: "claude-cli/saved",
       codexTarget: "codex-tui/saved",
       rules: [{ enabled: true, pattern: "^OpenAI/Python .*$" }],
     });
@@ -170,16 +160,11 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenCalledWith({
         enabled: true,
-        claudeTarget: "claude-cli/saved",
         codexTarget: "codex-tui/saved",
         rules: [{ enabled: true, pattern: "^OpenAI/Python .*$" }],
       });
     });
 
-    fireEvent.change(
-      screen.getByLabelText("settings.advanced.userAgentRewrite.claudeTarget"),
-      { target: { value: " claude-cli/staged " } },
-    );
     fireEvent.change(
       screen.getByLabelText("settings.advanced.userAgentRewrite.codexTarget"),
       { target: { value: " codex-tui/staged " } },
@@ -202,7 +187,6 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenCalledWith({
         enabled: false,
-        claudeTarget: "claude-cli/saved",
         codexTarget: "codex-tui/saved",
         rules: [{ enabled: true, pattern: "^OpenAI/Python .*$" }],
       });
@@ -216,7 +200,6 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenLastCalledWith({
         enabled: true,
-        claudeTarget: "claude-cli/saved",
         codexTarget: "codex-tui/saved",
         rules: [{ enabled: true, pattern: "^OpenAI/Python .*$" }],
       });
@@ -233,21 +216,25 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
     await waitFor(() => {
       expect(settingsApi.setUserAgentRewriteConfig).toHaveBeenCalledWith({
         enabled: true,
-        claudeTarget: "claude-cli/staged",
         codexTarget: "codex-tui/staged",
         rules: [{ enabled: true, pattern: "^Staged/.*$" }],
       });
     });
   });
 
-  it("blocks empty targets and invalid enabled regex before saving", async () => {
+  it("has no Claude target UI and blocks an empty Codex target or invalid regex", async () => {
     mockPanelConfig();
 
     render(<RectifierConfigPanel />);
 
+    expect(
+      screen.queryByLabelText(
+        "settings.advanced.userAgentRewrite.claudeTarget",
+      ),
+    ).not.toBeInTheDocument();
     fireEvent.change(
       await screen.findByLabelText(
-        "settings.advanced.userAgentRewrite.claudeTarget",
+        "settings.advanced.userAgentRewrite.codexTarget",
       ),
       { target: { value: " " } },
     );
@@ -259,12 +246,12 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
 
     expect(settingsApi.setUserAgentRewriteConfig).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith(
-      "settings.advanced.userAgentRewrite.claudeTargetRequired",
+      "settings.advanced.userAgentRewrite.codexTargetRequired",
     );
 
     fireEvent.change(
-      screen.getByLabelText("settings.advanced.userAgentRewrite.claudeTarget"),
-      { target: { value: "claude-cli/test" } },
+      screen.getByLabelText("settings.advanced.userAgentRewrite.codexTarget"),
+      { target: { value: "codex-tui/test" } },
     );
     fireEvent.change(
       screen.getByPlaceholderText(
@@ -287,7 +274,6 @@ describe("RectifierConfigPanel User-Agent rewrite settings", () => {
   it("does not add rules beyond the configured limit", async () => {
     mockPanelConfig({
       enabled: true,
-      claudeTarget: "claude-cli/full",
       codexTarget: "codex-tui/full",
       rules: Array.from({ length: 32 }, (_, index) => ({
         enabled: true,

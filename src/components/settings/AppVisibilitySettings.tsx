@@ -8,6 +8,7 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
 import type { AppId } from "@/lib/api";
+import { DEFAULT_VISIBLE_APPS } from "@/config/appConfig";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -27,12 +28,13 @@ const APP_CONFIG: Array<{
   },
   { id: "codex", icon: "openai", nameKey: "apps.codex" },
   { id: "gemini", icon: "gemini", nameKey: "apps.gemini" },
+  { id: "grokbuild", icon: "grok", nameKey: "apps.grokbuild" },
   { id: "opencode", icon: "opencode", nameKey: "apps.opencode" },
   { id: "openclaw", icon: "openclaw", nameKey: "apps.openclaw" },
   { id: "hermes", icon: "hermes", nameKey: "apps.hermes" },
 ];
 
-const WEB_APP_IDS = new Set<AppId>(["claude", "codex", "gemini"]);
+const WEB_APP_IDS = new Set<AppId>(["claude", "codex", "gemini", "grokbuild"]);
 
 export function AppVisibilitySettings({
   settings,
@@ -41,15 +43,7 @@ export function AppVisibilitySettings({
   const { t } = useTranslation();
   const isWeb = isWebRuntime();
 
-  const visibleApps: VisibleApps = settings.visibleApps ?? {
-    claude: true,
-    "claude-desktop": true,
-    codex: true,
-    gemini: true,
-    opencode: true,
-    openclaw: true,
-    hermes: true,
-  };
+  const visibleApps: VisibleApps = settings.visibleApps ?? DEFAULT_VISIBLE_APPS;
   const visibleAppOptions = isWeb
     ? APP_CONFIG.filter((app) => WEB_APP_IDS.has(app.id))
     : APP_CONFIG;
@@ -82,7 +76,7 @@ export function AppVisibilitySettings({
           {t("settings.appVisibility.description")}
         </p>
       </header>
-      <div className="inline-flex gap-1 rounded-md border border-border-default bg-background p-1">
+      <div className="flex flex-wrap gap-1 rounded-md border border-border-default bg-background p-1">
         {visibleAppOptions.map((app) => {
           const isVisible = visibleApps[app.id];
           // Disable button if this is the last visible app
@@ -139,6 +133,8 @@ function AppButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-label={name}
+      aria-pressed={active}
       size="sm"
       variant={active ? "default" : "ghost"}
       className={cn(

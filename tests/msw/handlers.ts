@@ -6,6 +6,9 @@ import {
   deleteProvider,
   deleteSession,
   getCurrentProviderId,
+  getProviderForEdit,
+  getUniversalProviderForEdit,
+  getUniversalProviders,
   getLiveProviderIds,
   getSessionMessages,
   getProviders,
@@ -49,6 +52,23 @@ export const handlers = [
     const { app } = await withJson<{ app: AppId }>(request);
     return success(getProviders(app));
   }),
+
+  http.post(`${TAURI_ENDPOINT}/get_provider_for_edit`, async ({ request }) => {
+    const { app, id } = await withJson<{ app: AppId; id: string }>(request);
+    return success(getProviderForEdit(app, id));
+  }),
+
+  http.post(`${TAURI_ENDPOINT}/get_universal_providers`, () =>
+    success(getUniversalProviders()),
+  ),
+
+  http.post(
+    `${TAURI_ENDPOINT}/get_universal_provider_for_edit`,
+    async ({ request }) => {
+      const { id } = await withJson<{ id: string }>(request);
+      return success(getUniversalProviderForEdit(id));
+    },
+  ),
 
   http.post(`${TAURI_ENDPOINT}/get_current_provider`, async ({ request }) => {
     const { app } = await withJson<{ app: AppId }>(request);
@@ -127,6 +147,13 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/open_external`, () => success(true)),
 
   http.post(`${TAURI_ENDPOINT}/list_sessions`, () => success(listSessions())),
+
+  http.post(`${TAURI_ENDPOINT}/list_profiles`, () =>
+    success({
+      profiles: [],
+      currentIds: { claude: null, claudeDesktop: null, codex: null },
+    }),
+  ),
 
   http.post(`${TAURI_ENDPOINT}/get_session_messages`, async ({ request }) => {
     const { providerId, sourcePath } = await withJson<{
@@ -338,6 +365,7 @@ export const handlers = [
       claude: false,
       codex: false,
       gemini: false,
+      grokbuild: false,
     }),
   ),
 

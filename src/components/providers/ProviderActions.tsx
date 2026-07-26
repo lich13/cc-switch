@@ -25,8 +25,8 @@ interface ProviderActionsProps {
   isProxyTakeover?: boolean;
   isOmo?: boolean;
   onSwitch: () => void;
-  onEdit: () => void;
-  onDuplicate: () => void;
+  onEdit?: () => void;
+  onDuplicate?: () => void;
   onTest?: () => void;
   onConfigureUsage?: () => void;
   onDelete: () => void;
@@ -281,29 +281,34 @@ export function ProviderActions({
       </span>
 
       <div className="flex items-center gap-1">
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={isReadOnly ? undefined : onEdit}
-          disabled={isReadOnly}
-          title={isReadOnly ? readOnlyHint : t("common.edit")}
-          className={cn(
-            iconButtonClass,
-            isReadOnly && "opacity-40 cursor-not-allowed text-muted-foreground",
-          )}
-        >
-          <Edit className="h-4 w-4" />
-        </Button>
+        {onEdit && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={isReadOnly ? undefined : onEdit}
+            disabled={isReadOnly}
+            title={isReadOnly ? readOnlyHint : t("common.edit")}
+            className={cn(
+              iconButtonClass,
+              isReadOnly &&
+                "opacity-40 cursor-not-allowed text-muted-foreground",
+            )}
+          >
+            <Edit className="h-4 w-4" />
+          </Button>
+        )}
 
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={onDuplicate}
-          title={t("provider.duplicate")}
-          className={iconButtonClass}
-        >
-          <Copy className="h-4 w-4" />
-        </Button>
+        {onDuplicate && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onDuplicate}
+            title={t("provider.duplicate")}
+            className={iconButtonClass}
+          >
+            <Copy className="h-4 w-4" />
+          </Button>
+        )}
 
         <Button
           size="icon"

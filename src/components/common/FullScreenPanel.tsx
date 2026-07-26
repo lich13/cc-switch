@@ -16,6 +16,7 @@ interface FullScreenPanelProps {
   isOpen: boolean;
   title: string;
   onClose: () => void;
+  onExitComplete?: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
   /**
@@ -37,6 +38,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
   isOpen,
   title,
   onClose,
+  onExitComplete,
   children,
   footer,
   contentClassName,
@@ -84,7 +86,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
   }, [isOpen]);
 
   return createPortal(
-    <AnimatePresence>
+    <AnimatePresence onExitComplete={onExitComplete}>
       {isOpen && (
         <motion.div
           initial={{ opacity: 0 }}

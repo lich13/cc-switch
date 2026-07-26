@@ -192,4 +192,39 @@ describe("Sub2apiExportDialog", () => {
     expect(exportButton).toBeDisabled();
     expect(scrollArea).not.toContainElement(exportButton);
   });
+
+  it("can scroll to the final account and select it while the footer stays separate", () => {
+    const longCandidates: Sub2apiExportCandidate[] = Array.from(
+      { length: 40 },
+      (_, index) => ({
+        appType: index % 2 === 0 ? "claude" : "codex",
+        providerId: `provider-${index + 1}`,
+        name: `Provider ${index + 1}`,
+        baseUrl: `https://provider-${index + 1}.example`,
+      }),
+    );
+    const props = renderDialog({ candidates: longCandidates });
+    const scrollArea = screen.getByTestId("sub2api-scroll-area");
+    Object.defineProperties(scrollArea, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2400 },
+    });
+
+    scrollArea.scrollTop = 2000;
+    fireEvent.scroll(scrollArea);
+    expect(scrollArea.scrollTop + scrollArea.clientHeight).toBe(
+      scrollArea.scrollHeight,
+    );
+
+    fireEvent.click(screen.getByLabelText("Provider 40"));
+    expect(props.onToggleProvider).toHaveBeenCalledWith(
+      { appType: "codex", providerId: "provider-40" },
+      true,
+    );
+
+    const exportButton = screen.getByRole("button", {
+      name: "settings.sub2apiExportDialog.export",
+    });
+    expect(scrollArea).not.toContainElement(exportButton);
+  });
 });

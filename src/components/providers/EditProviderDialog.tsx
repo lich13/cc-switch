@@ -14,6 +14,7 @@ interface EditProviderDialogProps {
   open: boolean;
   provider: Provider | null;
   onOpenChange: (open: boolean) => void;
+  onExitComplete?: () => void;
   onSubmit: (payload: {
     provider: Provider;
     originalId?: string;
@@ -26,6 +27,7 @@ export function EditProviderDialog({
   open,
   provider,
   onOpenChange,
+  onExitComplete,
   onSubmit,
   appId,
   isProxyTakeover = false,
@@ -45,11 +47,7 @@ export function EditProviderDialog({
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      if (!open || !provider) {
-        setLiveSettings(null);
-        setHasLoadedLive(false);
-        return;
-      }
+      if (!open || !provider) return;
 
       // 关键修复：只在首次打开时加载一次
       if (hasLoadedLive) {
@@ -217,6 +215,12 @@ export function EditProviderDialog({
     [appId, onSubmit, onOpenChange, provider],
   );
 
+  const handleExitComplete = useCallback(() => {
+    setLiveSettings(null);
+    setHasLoadedLive(false);
+    onExitComplete?.();
+  }, [onExitComplete]);
+
   if (!provider || !initialData) {
     return null;
   }
@@ -226,6 +230,7 @@ export function EditProviderDialog({
       isOpen={open}
       title={t("provider.editProvider")}
       onClose={() => onOpenChange(false)}
+      onExitComplete={handleExitComplete}
       footer={
         <Button
           type="submit"

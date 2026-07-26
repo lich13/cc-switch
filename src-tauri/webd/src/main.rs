@@ -95,7 +95,7 @@ async fn status_command(args: &[String]) -> Result<()> {
 
 fn open_database(config: &WebdConfig) -> Result<Arc<Database>> {
     Ok(Arc::new(
-        Database::init_at(&config.database_path)
+        Database::init_at_for_webd(&config.database_path)
             .with_context(|| format!("初始化数据库 {}", config.database_path.display()))?,
     ))
 }

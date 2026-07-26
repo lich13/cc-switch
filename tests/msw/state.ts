@@ -5,10 +5,13 @@ import type {
   SessionMessage,
   SessionMeta,
   Settings,
+  UniversalProvider,
+  UniversalProvidersMap,
 } from "@/types";
 import { deepClone } from "@/utils/deepClone";
 
 type ProvidersByApp = Record<AppId, Record<string, Provider>>;
+type ProviderEditDetailsByApp = Record<AppId, Record<string, Provider>>;
 type CurrentProviderState = Record<AppId, string>;
 type McpConfigState = Record<AppId, Record<string, McpServer>>;
 type LiveProviderIdsByApp = Record<
@@ -69,6 +72,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
       createdAt: Date.now(),
     },
   },
+  grokbuild: {},
   opencode: {},
   openclaw: {},
   hermes: {},
@@ -79,12 +83,16 @@ const createDefaultCurrent = (): CurrentProviderState => ({
   "claude-desktop": "",
   codex: "codex-1",
   gemini: "gemini-1",
+  grokbuild: "",
   opencode: "",
   openclaw: "",
   hermes: "",
 });
 
 let providers = createDefaultProviders();
+let providerEditDetails: ProviderEditDetailsByApp = createDefaultProviders();
+let universalProviders: UniversalProvidersMap = {};
+let universalProviderEditDetails: UniversalProvidersMap = {};
 let current = createDefaultCurrent();
 let liveProviderIds: LiveProviderIdsByApp = {
   opencode: [],
@@ -191,6 +199,7 @@ let mcpConfigs: McpConfigState = {
     },
   },
   gemini: {},
+  grokbuild: {},
   opencode: {},
   openclaw: {},
   hermes: {},
@@ -201,6 +210,9 @@ const cloneProviders = (value: ProvidersByApp) =>
 
 export const resetProviderState = () => {
   providers = createDefaultProviders();
+  providerEditDetails = createDefaultProviders();
+  universalProviders = {};
+  universalProviderEditDetails = {};
   current = createDefaultCurrent();
   liveProviderIds = {
     opencode: [],
@@ -259,6 +271,7 @@ export const resetProviderState = () => {
       },
     },
     gemini: {},
+    grokbuild: {},
     opencode: {},
     openclaw: {},
     hermes: {},
@@ -267,6 +280,41 @@ export const resetProviderState = () => {
 
 export const getProviders = (appType: AppId) =>
   cloneProviders(providers)[appType] ?? {};
+
+export const getProviderForEdit = (appType: AppId, providerId: string) => {
+  const provider = providerEditDetails[appType]?.[providerId];
+  return provider ? (deepClone(provider) as Provider) : null;
+};
+
+export const setProviderForEdit = (
+  appType: AppId,
+  providerId: string,
+  provider: Provider,
+) => {
+  providerEditDetails[appType] = providerEditDetails[appType] ?? {};
+  providerEditDetails[appType][providerId] = deepClone(provider) as Provider;
+};
+
+export const getUniversalProviders = () =>
+  deepClone(universalProviders) as UniversalProvidersMap;
+
+export const getUniversalProviderForEdit = (providerId: string) => {
+  const provider = universalProviderEditDetails[providerId];
+  return provider ? (deepClone(provider) as UniversalProvider) : null;
+};
+
+export const setUniversalProviders = (data: UniversalProvidersMap) => {
+  universalProviders = deepClone(data) as UniversalProvidersMap;
+};
+
+export const setUniversalProviderForEdit = (
+  providerId: string,
+  provider: UniversalProvider,
+) => {
+  universalProviderEditDetails[providerId] = deepClone(
+    provider,
+  ) as UniversalProvider;
+};
 
 export const getCurrentProviderId = (appType: AppId) => current[appType] ?? "";
 
