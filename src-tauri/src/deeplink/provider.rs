@@ -95,10 +95,6 @@ pub fn import_provider_from_deeplink(
     let app_type = AppType::from_str(&app_str)
         .map_err(|_| AppError::InvalidInput(format!("Invalid app type: {app_str}")))?;
 
-    if matches!(app_type, AppType::Codex) && merged_request.enabled.unwrap_or(false) {
-        crate::codex_config::reject_codex_live_write()?;
-    }
-
     // Build provider configuration based on app type
     let mut provider = build_provider_from_request(&app_type, &merged_request)?;
 
