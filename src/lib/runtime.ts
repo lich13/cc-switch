@@ -304,6 +304,17 @@ export function getCurrentWindow() {
         (w) => w.onResized(handler),
         () => undefined,
       ),
+    onFocusChanged: (
+      handler: Parameters<
+        ReturnType<
+          typeof import("@tauri-apps/api/window").getCurrentWindow
+        >["onFocusChanged"]
+      >[0],
+    ) =>
+      call(
+        (w) => w.onFocusChanged(handler),
+        () => undefined,
+      ),
     setDecorations: (enabled: boolean) =>
       call(async (w) => {
         await w.setDecorations(enabled);

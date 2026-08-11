@@ -4,6 +4,7 @@ use crate::provider::Provider;
 use crate::proxy::http_client;
 use crate::proxy::types::{AppProxyConfig, GlobalProxyConfig, ProxyConfig};
 use crate::services::model_fetch;
+use crate::services::model_pricing::ModelPricingInfo;
 use crate::services::provider::ProviderService;
 use crate::services::stream_check::{HealthStatus, StreamCheckResult, StreamCheckService};
 use crate::services::{McpService, PromptService, ProviderSortUpdate, SkillService};
@@ -555,6 +556,33 @@ pub async fn dispatch(
             crate::services::session_usage::get_data_source_breakdown(&state.db)?,
         )?,
         "get_model_pricing" => to_value(get_model_pricing(state)?)?,
+        "update_model_pricing_batch" => {
+            let entries: Vec<crate::services::model_pricing::ModelPricingInfo> =
+                arg(&args, "entries")?;
+            to_value(crate::services::model_pricing::update_model_pricing_batch(
+                &state.db, entries,
+            )?)?
+        }
+        "get_models_dev_sync_config" => to_value(
+            crate::services::model_pricing::get_models_dev_sync_state(&state.db)?,
+        )?,
+        "save_models_dev_sync_config" => {
+            let config: crate::services::model_pricing::ModelsDevSyncConfig = arg(&args, "config")?;
+            crate::services::model_pricing::save_models_dev_sync_config(&state.db, config)?;
+            Value::Null
+        }
+        "record_models_dev_sync_result" => {
+            let synced_at: Option<i64> = opt_arg(&args, "syncedAt")?;
+            let error: Option<String> = opt_arg(&args, "error")?;
+            crate::services::model_pricing::record_models_dev_sync_result(
+                &state.db, synced_at, error,
+            )?;
+            Value::Null
+        }
+        "get_codex_oauth_quota" => {
+            let account_id: Option<String> = opt_arg(&args, "accountId")?;
+            to_value(get_codex_oauth_quota(state, account_id).await?)?
+        }
         "update_model_pricing" => {
             let model_id: String = arg(&args, "modelId")?;
             let display_name: String = arg(&args, "displayName")?;
@@ -779,6 +807,45 @@ fn web_common_config_app_type(value: &str) -> Result<AppType, String> {
 
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
+}
+
+async fn get_codex_oauth_quota(
+    state: &AppState,
+    account_id: Option<String>,
+) -> Result<crate::services::subscription::SubscriptionQuota, String> {
+    let manager = state.managed_auth.codex_oauth.read().await;
+    let account_id = match account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(id.to_string()),
+        None => manager.default_account_id().await,
+    };
+    let Some(account_id) = account_id else {
+        return Ok(crate::services::subscription::SubscriptionQuota::not_found(
+            "codex_oauth",
+        ));
+    };
+
+    let token = match manager.get_valid_token_for_account(&account_id).await {
+        Ok(token) => token,
+        Err(error) => {
+            return Ok(crate::services::subscription::SubscriptionQuota::error(
+                "codex_oauth",
+                crate::services::subscription::CredentialStatus::Expired,
+                format!("Codex OAuth token unavailable: {error}"),
+            ));
+        }
+    };
+
+    crate::services::subscription::query_codex_quota(
+        &token,
+        Some(&account_id),
+        "codex_oauth",
+        "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
+    )
+    .await
 }
 
 fn reject_desktop_command(command: &str) -> Result<Value, String> {
@@ -1143,8 +1210,9 @@ fn restore_toml_secret_placeholders(incoming: &mut toml::Value, existing: Option
     }
 }
 
-fn get_model_pricing(state: &AppState) -> Result<Vec<crate::commands::ModelPricingInfo>, AppError> {
+fn get_model_pricing(state: &AppState) -> Result<Vec<ModelPricingInfo>, AppError> {
     state.db.ensure_model_pricing_seeded()?;
+    crate::services::model_pricing::sync_local_model_pricing(&state.db)?;
 
     let db = state.db.clone();
     let conn = crate::database::lock_conn!(db.conn);
@@ -1168,7 +1236,7 @@ fn get_model_pricing(state: &AppState) -> Result<Vec<crate::commands::ModelPrici
     )?;
 
     let rows = stmt.query_map([], |row| {
-        Ok(crate::commands::ModelPricingInfo {
+        Ok(ModelPricingInfo {
             model_id: row.get(0)?,
             display_name: row.get(1)?,
             input_cost_per_million: row.get(2)?,
@@ -1529,6 +1597,25 @@ mod tests {
         .await
         .expect("update model pricing");
 
+        let batch_updated = dispatch(
+            &state,
+            "update_model_pricing_batch",
+            json!({
+                "entries": [{
+                    "modelId": "batch-model",
+                    "displayName": "Batch Model",
+                    "inputCostPerMillion": "3.00",
+                    "outputCostPerMillion": "4.00",
+                    "cacheReadCostPerMillion": "0.30",
+                    "cacheCreationCostPerMillion": "0.40"
+                }]
+            }),
+            false,
+        )
+        .await
+        .expect("batch update model pricing");
+        assert!(batch_updated.as_u64().is_some());
+
         let pricing = dispatch(&state, "get_model_pricing", json!({}), false)
             .await
             .expect("get model pricing");
@@ -1537,6 +1624,48 @@ mod tests {
             row.get("modelId").and_then(Value::as_str) == Some("test-model")
                 && row.get("inputCostPerMillion").and_then(Value::as_str) == Some("1.25")
         }));
+        assert!(rows.iter().any(|row| {
+            row.get("modelId").and_then(Value::as_str) == Some("batch-model")
+                && row.get("outputCostPerMillion").and_then(Value::as_str) == Some("4.00")
+        }));
+
+        let sync_state = dispatch(&state, "get_models_dev_sync_config", json!({}), false)
+            .await
+            .expect("get models.dev sync config");
+        assert!(sync_state.get("config").is_some());
+        dispatch(
+            &state,
+            "save_models_dev_sync_config",
+            json!({
+                "config": {
+                    "autoSyncEnabled": true,
+                    "includeCommonModels": false,
+                    "selectedModelKeys": ["openai/gpt-5"],
+                    "excludedCommonModelKeys": [],
+                    "lastSyncAt": null,
+                    "lastSyncError": null
+                }
+            }),
+            false,
+        )
+        .await
+        .expect("save models.dev sync config");
+        dispatch(
+            &state,
+            "record_models_dev_sync_result",
+            json!({ "syncedAt": 123, "error": null }),
+            false,
+        )
+        .await
+        .expect("record models.dev sync result");
+        let sync_state = dispatch(&state, "get_models_dev_sync_config", json!({}), false)
+            .await
+            .expect("reload models.dev sync config");
+        assert_eq!(
+            sync_state.pointer("/config/autoSyncEnabled"),
+            Some(&json!(true))
+        );
+        assert_eq!(sync_state.pointer("/config/lastSyncAt"), Some(&json!(123)));
 
         dispatch(
             &state,
@@ -1833,6 +1962,18 @@ mod tests {
             .expect("WebUI managed auth logout");
         }
 
+        let quota = dispatch(&state, "get_codex_oauth_quota", json!({}), false)
+            .await
+            .expect("WebUI may read the Codex OAuth quota");
+        assert_eq!(
+            quota.get("tool").and_then(Value::as_str),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            quota.get("credentialStatus").and_then(Value::as_str),
+            Some("not_found")
+        );
+
         for (command, args) in [
             ("auth_get_status", json!({ "authProvider": "xai_oauth" })),
             ("auth_list_accounts", json!({ "authProvider": "xai_oauth" })),
@@ -1868,6 +2009,11 @@ mod tests {
                 "{command}: {err}"
             );
         }
+
+        let err = dispatch(&state, "get_xai_oauth_quota", json!({}), false)
+            .await
+            .expect_err("WebUI must not expose xAI OAuth quota");
+        assert!(err.contains("WebUI 未开放命令"), "{err}");
     }
 
     #[tokio::test]

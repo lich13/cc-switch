@@ -23,6 +23,9 @@ vi.mock("@/components/SubscriptionQuotaFooter", () => ({
 }));
 vi.mock("@/components/CopilotQuotaFooter", () => ({ default: () => null }));
 vi.mock("@/components/CodexOauthQuotaFooter", () => ({ default: () => null }));
+vi.mock("@/components/XaiOauthQuotaFooter", () => ({
+  default: () => <span>xai-quota</span>,
+}));
 
 vi.mock("@/components/providers/ProviderActions", () => ({
   ProviderActions: ({ onEdit, onDuplicate, onDelete }: any) => (
@@ -65,7 +68,7 @@ const renderProvider = (provider: Provider) =>
   );
 
 describe("ProviderCard xAI WebUI actions", () => {
-  it("hides edit and duplicate entry points for managed xAI OAuth data", () => {
+  it("hides all management and quota entry points for managed xAI OAuth data", () => {
     renderProvider({
       ...baseProvider,
       meta: {
@@ -77,7 +80,8 @@ describe("ProviderCard xAI WebUI actions", () => {
     expect(screen.getByText("xAI Provider")).toBeInTheDocument();
     expect(screen.queryByText("edit-entry")).not.toBeInTheDocument();
     expect(screen.queryByText("duplicate-entry")).not.toBeInTheDocument();
-    expect(screen.getByText("delete-entry")).toBeInTheDocument();
+    expect(screen.queryByText("delete-entry")).not.toBeInTheDocument();
+    expect(screen.queryByText("xai-quota")).not.toBeInTheDocument();
   });
 
   it("keeps normal xAI API-key providers editable in WebUI", () => {

@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
-use crate::provider::{Provider, ProviderManager, UniversalProvider};
+use crate::provider::{Provider, ProviderManager, ProviderMeta, UniversalProvider};
 use indexmap::IndexMap;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -54,7 +54,7 @@ const LEGACY_SCHEMA_SQL: &str = r#"
 
 // v3.8.x（schema v1）的真实表结构快照：用于验证从 v3.8.* 升级到当前版本的迁移链路
 // 参考：tag v3.8.3 的 src-tauri/src/database/schema.rs
-const V3_8_SCHEMA_V1_SQL: &str = r#"
+pub(super) const V3_8_SCHEMA_V1_SQL: &str = r#"
     CREATE TABLE providers (
         id TEXT NOT NULL,
         app_type TEXT NOT NULL,
@@ -169,6 +169,23 @@ fn make_provider(id: &str, name: &str, base_url: &str) -> Provider {
     provider.notes = Some(format!("{name} notes"));
     provider.icon = Some("box".to_string());
     provider.icon_color = Some("#336699".to_string());
+    provider
+}
+
+fn make_xai_oauth_provider(id: &str) -> Provider {
+    let mut provider = Provider::with_id(
+        id.to_string(),
+        "xAI OAuth Managed".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "xai-oauth-managed-secret" },
+            "config": "model_provider = \"xai\"\n[model_providers.xai]\nbase_url = \"https://api.x.ai/v1\"\n"
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        provider_type: Some("xai_oauth".to_string()),
+        ..Default::default()
+    });
     provider
 }
 
@@ -647,6 +664,8 @@ fn providers_sub2api_selected_export_rejects_empty_unknown_and_non_exportable_se
         ),
     )
     .expect("save non-exportable provider");
+    db.save_provider("codex", &make_xai_oauth_provider("xai-oauth"))
+        .expect("save xAI OAuth provider");
 
     let empty_err = db
         .export_providers_sub2api_json_string_for_selection(&[])
@@ -677,6 +696,17 @@ fn providers_sub2api_selected_export_rejects_empty_unknown_and_non_exportable_se
         non_exportable_err.to_string().contains("not exportable"),
         "unexpected non-exportable provider error: {non_exportable_err}"
     );
+
+    let xai_oauth_err = db
+        .export_providers_sub2api_json_string_for_selection(&[Sub2apiProviderSelection::new(
+            "codex",
+            "xai-oauth",
+        )])
+        .expect_err("xAI OAuth provider should not be exportable");
+    assert!(
+        xai_oauth_err.to_string().contains("not exportable"),
+        "unexpected xAI OAuth provider error: {xai_oauth_err}"
+    );
 }
 
 #[test]
@@ -702,6 +732,8 @@ fn providers_sub2api_candidates_expose_metadata_without_secrets() {
         ),
     )
     .expect("save non-exportable provider");
+    db.save_provider("codex", &make_xai_oauth_provider("xai-oauth"))
+        .expect("save xAI OAuth provider");
 
     let candidates = db
         .list_sub2api_export_candidates()
@@ -712,6 +744,9 @@ fn providers_sub2api_candidates_expose_metadata_without_secrets() {
     assert_eq!(candidates[0].provider_id, "exportable");
     assert_eq!(candidates[0].name, "Exportable");
     assert_eq!(candidates[0].base_url, "https://exportable.example");
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.provider_id != "xai-oauth"));
 
     let serialized = serde_json::to_value(&candidates[0]).expect("candidate json");
     assert!(serialized.get("appType").is_some());

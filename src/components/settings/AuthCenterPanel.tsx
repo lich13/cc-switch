@@ -71,7 +71,7 @@ export function AuthCenterPanel() {
           </div>
         </div>
 
-        <CodexOAuthSection />
+        <CodexOAuthSection showAccountQuota />
       </section>
 
       {!isWeb && (

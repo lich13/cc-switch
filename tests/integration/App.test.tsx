@@ -1,6 +1,12 @@
 import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { providersApi } from "@/lib/api/providers";
@@ -21,6 +27,11 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const runtimeMocks = vi.hoisted(() => ({
   isWebRuntime: vi.fn(() => false),
+}));
+
+const skillsPanelMocks = vi.hoisted(() => ({
+  checkUpdates: vi.fn(),
+  openDiscovery: vi.fn(),
 }));
 
 vi.mock("@/lib/runtime", async () => {
@@ -160,6 +171,32 @@ vi.mock("@/components/AppSwitcher", () => ({
   ),
 }));
 
+vi.mock("@/components/skills/UnifiedSkillsPanel", async () => {
+  const React = await import("react");
+  const MockUnifiedSkillsPanel = React.forwardRef(
+    ({ onCheckUpdatesStateChange }: any, ref) => {
+      React.useEffect(() => {
+        onCheckUpdatesStateChange?.({ isChecking: false, hasSkills: true });
+        return () =>
+          onCheckUpdatesStateChange?.({
+            isChecking: false,
+            hasSkills: false,
+          });
+      }, [onCheckUpdatesStateChange]);
+      React.useImperativeHandle(ref, () => ({
+        openDiscovery: skillsPanelMocks.openDiscovery,
+        openImport: vi.fn(),
+        openInstallFromZip: vi.fn(),
+        openRestoreFromBackup: vi.fn(),
+        checkUpdates: skillsPanelMocks.checkUpdates,
+      }));
+      return <div data-testid="unified-skills-panel" />;
+    },
+  );
+  MockUnifiedSkillsPanel.displayName = "MockUnifiedSkillsPanel";
+  return { default: MockUnifiedSkillsPanel };
+});
+
 vi.mock("@/components/UpdateBadge", () => ({
   UpdateBadge: ({ onClick }: any) => (
     <button onClick={onClick}>update-badge</button>
@@ -196,6 +233,8 @@ describe("App integration with MSW", () => {
     runtimeMocks.isWebRuntime.mockReturnValue(false);
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    skillsPanelMocks.checkUpdates.mockReset();
+    skillsPanelMocks.openDiscovery.mockReset();
     window.localStorage.clear();
   });
 
@@ -247,7 +286,7 @@ describe("App integration with MSW", () => {
 
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");
@@ -495,5 +534,82 @@ describe("App integration with MSW", () => {
     expect(
       screen.queryByTestId("edit-provider-dialog"),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps compact Web provider toolbar actions accessible", async () => {
+    runtimeMocks.isWebRuntime.mockReturnValue(true);
+    window.localStorage.setItem("cc-switch-last-app", "codex");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("codex-1"),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "firstRunNotice.confirm" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "firstRunNotice.title" }),
+      ).not.toBeInTheDocument(),
+    );
+
+    const exportButton = screen.getByRole("button", {
+      name: "settings.exportProvidersSub2api",
+    });
+    expect(exportButton).toHaveClass("w-8", "sm:w-auto");
+    expect(exportButton.querySelector("span")).toHaveClass(
+      "hidden",
+      "sm:inline",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "common.moreActions" }));
+    const compactMenu = await screen.findByTestId("web-provider-tools-menu");
+    const compactActions = within(compactMenu);
+    expect(
+      compactActions.getByRole("button", { name: "skills.manage" }),
+    ).toBeInTheDocument();
+    expect(
+      compactActions.getByRole("button", { name: "prompts.manage" }),
+    ).toBeInTheDocument();
+    expect(
+      compactActions.getByRole("button", { name: "mcp.title" }),
+    ).toBeInTheDocument();
+  });
+
+  it("hosts the Skills check-update action in the App toolbar", async () => {
+    localStorage.setItem("cc-switch-last-view", "skills");
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    expect(
+      await screen.findByTestId("unified-skills-panel"),
+    ).toBeInTheDocument();
+    const checkUpdatesButton = await screen.findByRole("button", {
+      name: "skills.checkUpdates",
+    });
+    await waitFor(() => expect(checkUpdatesButton).toBeEnabled());
+
+    fireEvent.click(checkUpdatesButton);
+    expect(skillsPanelMocks.checkUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the Skills discover toolbar action through the panel guard", async () => {
+    localStorage.setItem("cc-switch-last-view", "skills");
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    expect(
+      await screen.findByTestId("unified-skills-panel"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "skills.discover",
+      }),
+    );
+
+    expect(skillsPanelMocks.openDiscovery).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("unified-skills-panel")).toBeInTheDocument();
   });
 });

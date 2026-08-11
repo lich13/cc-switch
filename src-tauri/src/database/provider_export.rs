@@ -293,6 +293,13 @@ impl Database {
         app_type: &AppType,
         provider: &Provider,
     ) -> Option<Sub2apiExportableProvider> {
+        // OAuth-managed accounts do not own an exportable API key. Their
+        // stored auth material is a routing credential and must never be
+        // converted into a sub2api API-key account.
+        if provider.is_xai_oauth() {
+            return None;
+        }
+
         let (base_url, api_key) = provider.resolve_usage_credentials(app_type);
         let api_key = api_key.trim().to_string();
         let base_url = strip_sub2api_base_url(&base_url);

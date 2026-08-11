@@ -14,6 +14,7 @@ import UsageFooter from "@/components/UsageFooter";
 import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
+import XaiOauthQuotaFooter from "@/components/XaiOauthQuotaFooter";
 import {
   isOAuthProviderType,
   PROVIDER_TYPES,
@@ -191,6 +192,7 @@ export function ProviderCard({
   onSetAsDefault,
 }: ProviderCardProps) {
   const { t } = useTranslation();
+  const isWeb = isWebRuntime();
 
   // OMO and OMO Slim share the same card behavior
   const isAnyOmo = isOmo || isOmoSlim;
@@ -220,7 +222,7 @@ export function ProviderCard({
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
   const isOfficial = isOfficialProvider(provider, appId);
   const supportsOfficialSubscription =
-    isOfficial && ["claude", "codex", "gemini"].includes(appId);
+    isOfficial && ["claude", "codex", "gemini", "grokbuild"].includes(appId);
   const isOfficialSubscriptionUsage =
     provider.meta?.usage_script?.templateType ===
     TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
@@ -251,6 +253,8 @@ export function ProviderCard({
     appId === "hermes" && isHermesReadOnlyProvider(provider.settingsConfig);
   const isCodexOauth =
     provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
+  // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
+  const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
   // 统一权威谓词（详见 providerNeedsRouting）：以 providerType 为准，不受
   // apiFormat 被改动/缺省影响。此 badge 仅在 Codex 视图渲染，故加 appId 守卫。
   const codexNeedsRouting =
@@ -263,7 +267,7 @@ export function ProviderCard({
     provider.meta?.disableImageGeneration === true ||
     provider.meta?.disableImageGeneration === "chat";
   const hideManagedXaiWebActions =
-    isWebRuntime() && provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
+    isWeb && provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
 
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
@@ -276,7 +280,11 @@ export function ProviderCard({
     : 0;
 
   const { data: usage } = useUsageQuery(provider.id, appId, {
-    enabled: usageEnabled && !isOfficial && !isOfficialSubscriptionUsage,
+    enabled:
+      usageEnabled &&
+      !isOfficial &&
+      !isOfficialSubscriptionUsage &&
+      !hideManagedXaiWebActions,
     autoQueryInterval,
   });
 
@@ -543,6 +551,12 @@ export function ProviderCard({
                   inline={true}
                   isCurrent={isCurrent}
                 />
+              ) : isXaiOauth && !hideManagedXaiWebActions ? (
+                <XaiOauthQuotaFooter
+                  meta={provider.meta}
+                  inline={true}
+                  isCurrent={isCurrent}
+                />
               ) : isOfficial ? (
                 officialSubscriptionEnabled ? (
                   <SubscriptionQuotaFooter
@@ -597,60 +611,57 @@ export function ProviderCard({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100 group-hover:pointer-events-auto group-focus-within:pointer-events-auto transition-opacity duration-200">
-            <ProviderActions
-              appId={appId}
-              isCurrent={isCurrent}
-              isInConfig={isInConfig}
-              isTesting={isTesting}
-              isProxyTakeover={isProxyTakeover}
-              isOfficialBlockedByProxy={isOfficialBlockedByProxy}
-              isReadOnly={isHermesReadOnly}
-              isOmo={isAnyOmo}
-              onSwitch={() => onSwitch(provider)}
-              onEdit={
-                hideManagedXaiWebActions ? undefined : () => onEdit(provider)
-              }
-              onDuplicate={
-                hideManagedXaiWebActions
-                  ? undefined
-                  : () => onDuplicate(provider)
-              }
-              onTest={
-                // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的
-                // 真实请求探测会误报、而可达性探测能正确处理的对象）。官方供应商
-                // (category === "official") 一律隐藏：它们 base_url 故意留空、走客户端
-                // 默认/OAuth 端点，cc-switch 没有可靠的探测目标（尤其 Claude Desktop
-                // 官方是原生 1P 模式，根本不在请求路径上）。
-                onTest && provider.category !== "official"
-                  ? () => onTest(provider)
-                  : undefined
-              }
-              onConfigureUsage={
-                (isOfficial && !supportsOfficialSubscription) ||
-                isCopilot ||
-                isCodexOauth
-                  ? undefined
-                  : () => onConfigureUsage(provider)
-              }
-              onDelete={() => onDelete(provider)}
-              onRemoveFromConfig={
-                onRemoveFromConfig
-                  ? () => onRemoveFromConfig(provider)
-                  : undefined
-              }
-              onDisableOmo={handleDisableAnyOmo}
-              onOpenTerminal={
-                onOpenTerminal ? () => onOpenTerminal(provider) : undefined
-              }
-              isAutoFailoverEnabled={isAutoFailoverEnabled}
-              isInFailoverQueue={isInFailoverQueue}
-              onToggleFailover={onToggleFailover}
-              // OpenClaw: default model
-              isDefaultModel={isDefaultModel}
-              onSetAsDefault={onSetAsDefault}
-            />
-          </div>
+          {!hideManagedXaiWebActions && (
+            <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100 group-hover:pointer-events-auto group-focus-within:pointer-events-auto transition-opacity duration-200">
+              <ProviderActions
+                appId={appId}
+                isCurrent={isCurrent}
+                isInConfig={isInConfig}
+                isTesting={isTesting}
+                isProxyTakeover={isProxyTakeover}
+                isOfficialBlockedByProxy={isOfficialBlockedByProxy}
+                isReadOnly={isHermesReadOnly}
+                isOmo={isAnyOmo}
+                onSwitch={() => onSwitch(provider)}
+                onEdit={() => onEdit(provider)}
+                onDuplicate={() => onDuplicate(provider)}
+                onTest={
+                  // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的
+                  // 真实请求探测会误报、而可达性探测能正确处理的对象）。官方供应商
+                  // (category === "official") 一律隐藏：它们 base_url 故意留空、走客户端
+                  // 默认/OAuth 端点，cc-switch 没有可靠的探测目标（尤其 Claude Desktop
+                  // 官方是原生 1P 模式，根本不在请求路径上）。
+                  onTest && provider.category !== "official"
+                    ? () => onTest(provider)
+                    : undefined
+                }
+                onConfigureUsage={
+                  (isOfficial && !supportsOfficialSubscription) ||
+                  isCopilot ||
+                  isCodexOauth ||
+                  isXaiOauth
+                    ? undefined
+                    : () => onConfigureUsage(provider)
+                }
+                onDelete={() => onDelete(provider)}
+                onRemoveFromConfig={
+                  onRemoveFromConfig
+                    ? () => onRemoveFromConfig(provider)
+                    : undefined
+                }
+                onDisableOmo={handleDisableAnyOmo}
+                onOpenTerminal={
+                  onOpenTerminal ? () => onOpenTerminal(provider) : undefined
+                }
+                isAutoFailoverEnabled={isAutoFailoverEnabled}
+                isInFailoverQueue={isInFailoverQueue}
+                onToggleFailover={onToggleFailover}
+                // OpenClaw: default model
+                isDefaultModel={isDefaultModel}
+                onSetAsDefault={onSetAsDefault}
+              />
+            </div>
+          )}
         </div>
       </div>
 

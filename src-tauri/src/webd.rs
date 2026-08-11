@@ -622,6 +622,7 @@ async fn import_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProviderMeta;
     use crate::{web_auth, Database, Provider};
     use axum::{
         body::Body,
@@ -1316,12 +1317,27 @@ mod tests {
             json!({ "env": { "ANTHROPIC_BASE_URL": "https://empty.example/v1", "ANTHROPIC_AUTH_TOKEN": "" } }),
             None,
         );
+        let mut xai_oauth_provider = Provider::with_id(
+            "xai-oauth".to_string(),
+            "xAI OAuth Managed".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "xai-oauth-managed-secret" },
+                "config": "model_provider = \"xai\"\n[model_providers.xai]\nbase_url = \"https://api.x.ai/v1\"\n"
+            }),
+            None,
+        );
+        xai_oauth_provider.meta = Some(ProviderMeta {
+            provider_type: Some("xai_oauth".to_string()),
+            ..Default::default()
+        });
         db.save_provider("claude", &first_provider)
             .expect("seed first provider");
         db.save_provider("claude", &second_provider)
             .expect("seed second provider");
         db.save_provider("claude", &empty_key_provider)
             .expect("seed empty provider");
+        db.save_provider("codex", &xai_oauth_provider)
+            .expect("seed xAI OAuth provider");
 
         let response = app
             .clone()
@@ -1422,6 +1438,28 @@ mod tests {
             .get("error")
             .and_then(Value::as_str)
             .is_some_and(|error| error.contains("empty selection")));
+
+        let response = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/admin/providers/export/sub2api",
+                json!({
+                    "selectedProviders": [
+                        { "appType": "codex", "providerId": "xai-oauth" }
+                    ]
+                }),
+                Some(&cookie),
+                Some(&csrf),
+            ))
+            .await
+            .expect("xAI OAuth selected export");
+        let (status, _headers, body) = json_response(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("not exportable")));
 
         let response = app
             .oneshot(authed_json_request(
