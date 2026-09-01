@@ -60,6 +60,8 @@ vi.mock("@/components/providers/ProviderList", () => ({
     onConfigureUsage,
     onOpenWebsite,
     onCreate,
+    onDelete,
+    onRemoveFromConfig,
   }: any) => (
     <div>
       <div data-testid="provider-list">{JSON.stringify(providers)}</div>
@@ -76,6 +78,12 @@ vi.mock("@/components/providers/ProviderList", () => ({
       </button>
       <button onClick={() => onOpenWebsite("https://example.com")}>
         open-website
+      </button>
+      <button onClick={() => onDelete(Object.values(providers)[0])}>
+        delete
+      </button>
+      <button onClick={() => onRemoveFromConfig?.(Object.values(providers)[0])}>
+        remove
       </button>
       <button onClick={() => onCreate?.()}>create</button>
     </div>
@@ -151,9 +159,10 @@ vi.mock("@/components/UsageScriptModal", () => ({
 }));
 
 vi.mock("@/components/ConfirmDialog", () => ({
-  ConfirmDialog: ({ isOpen, onConfirm, onCancel }: any) =>
+  ConfirmDialog: ({ isOpen, message, onConfirm, onCancel }: any) =>
     isOpen ? (
       <div data-testid="confirm-dialog">
+        <div data-testid="confirm-message">{message}</div>
         <button onClick={() => onConfirm()}>confirm-delete</button>
         <button onClick={() => onCancel()}>cancel-delete</button>
       </div>
@@ -341,6 +350,7 @@ describe("App integration with MSW", () => {
         opencode: false,
         openclaw: true,
         hermes: false,
+        pi: false,
       },
     });
     setProviders("openclaw", {
@@ -385,6 +395,66 @@ describe("App integration with MSW", () => {
     );
   });
 
+  it("warns without blocking when removing Pi's global default provider", async () => {
+    localStorage.setItem("cc-switch-last-app", "pi");
+    setSettings({
+      visibleApps: {
+        claude: false,
+        "claude-desktop": false,
+        codex: true,
+        gemini: false,
+        grokbuild: true,
+        opencode: false,
+        openclaw: false,
+        hermes: false,
+        pi: true,
+      },
+    });
+    setProviders("pi", {
+      custom: {
+        id: "custom",
+        name: "Custom Pi",
+        settingsConfig: {
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [{ id: "model-a" }],
+        },
+        category: "custom",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    server.use(
+      http.post("http://tauri.local/get_pi_current_state", () =>
+        HttpResponse.json({
+          enabledProviderIds: ["custom"],
+          defaultProviderId: "custom",
+        }),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "Custom Pi",
+      ),
+    );
+    fireEvent.click(screen.getByText("remove"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-message")).toHaveTextContent(
+        "confirm.piDefaultProviderWarning",
+      ),
+    );
+    fireEvent.click(screen.getByText("confirm-delete"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument(),
+    );
+  });
+
   it("shows toast when duplicate cannot load live provider ids", async () => {
     setSettings({
       visibleApps: {
@@ -396,6 +466,7 @@ describe("App integration with MSW", () => {
         opencode: false,
         openclaw: true,
         hermes: false,
+        pi: false,
       },
     });
     setProviders("openclaw", {

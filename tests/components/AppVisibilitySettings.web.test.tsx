@@ -79,6 +79,7 @@ describe("AppVisibilitySettings web runtime", () => {
             opencode: false,
             openclaw: false,
             hermes: false,
+            pi: false,
           },
         }}
         onChange={vi.fn()}

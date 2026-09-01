@@ -174,10 +174,15 @@ pub async fn dispatch(
         "auth_start_login" => {
             let auth_provider: String = arg(&args, "authProvider")?;
             let github_domain: Option<String> = opt_arg(&args, "githubDomain")?;
+            let target_account_id: Option<String> = opt_arg(&args, "targetAccountId")?;
             to_value(
                 state
                     .managed_auth
-                    .web_start_login(&auth_provider, github_domain.as_deref())
+                    .web_start_login(
+                        &auth_provider,
+                        github_domain.as_deref(),
+                        target_account_id.as_deref(),
+                    )
                     .await?,
             )?
         }
@@ -188,7 +193,12 @@ pub async fn dispatch(
             to_value(
                 state
                     .managed_auth
-                    .web_poll_for_account(&auth_provider, &device_code, github_domain.as_deref())
+                    .web_poll_for_account(
+                        &auth_provider,
+                        &device_code,
+                        github_domain.as_deref(),
+                        state,
+                    )
                     .await?,
             )?
         }
@@ -716,14 +726,23 @@ pub async fn dispatch(
             let api_key: String = arg(&args, "apiKey")?;
             let is_full_url: Option<bool> = opt_arg(&args, "isFullUrl")?;
             let models_url: Option<String> = opt_arg(&args, "modelsUrl")?;
+            let custom_user_agent: Option<String> = opt_arg(&args, "customUserAgent")?;
+            let api_format: Option<String> = opt_arg(&args, "apiFormat")?;
+            let request_headers: Option<std::collections::BTreeMap<String, String>> =
+                opt_arg(&args, "requestHeaders")?;
             validate_fetch_models_urls(&base_url, models_url.as_deref(), production)?;
+            let user_agent = crate::provider::parse_custom_user_agent(custom_user_agent.as_deref())
+                .ok()
+                .flatten();
             to_value(
                 model_fetch::fetch_models(
                     &base_url,
                     &api_key,
                     is_full_url.unwrap_or(false),
                     models_url.as_deref(),
-                    None,
+                    user_agent,
+                    api_format.as_deref(),
+                    request_headers.as_ref(),
                 )
                 .await?,
             )?
@@ -813,7 +832,7 @@ async fn get_codex_oauth_quota(
     state: &AppState,
     account_id: Option<String>,
 ) -> Result<crate::services::subscription::SubscriptionQuota, String> {
-    let manager = state.managed_auth.codex_oauth.read().await;
+    let manager = &state.managed_auth.codex_oauth;
     let account_id = match account_id
         .as_deref()
         .map(str::trim)
@@ -1466,6 +1485,7 @@ fn config_dir_for_app(app: AppType) -> Result<std::path::PathBuf, String> {
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
         AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
         AppType::Hermes => crate::hermes_config::get_hermes_dir(),
+        AppType::Pi => return Err("WebUI 不支持访问 Pi 本地目录".to_string()),
     };
     Ok(dir)
 }

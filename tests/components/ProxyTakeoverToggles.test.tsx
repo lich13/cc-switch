@@ -11,6 +11,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProxyPanel } from "@/components/proxy/ProxyPanel";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
+import { getAppLabel } from "@/config/appConfig";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 const { invokeMock, toastSuccessMock, toastErrorMock } = vi.hoisted(() => ({
@@ -181,7 +182,7 @@ function expectCommandCalled(command: string) {
 }
 
 function getPanelAppSwitch(appType: RoutedApp) {
-  const row = screen.getByText(appType).closest("div");
+  const row = screen.getByText(getAppLabel(appType)).closest("div");
   expect(row).not.toBeNull();
   return within(row as HTMLElement).getByRole("switch");
 }
@@ -314,7 +315,7 @@ describe("Proxy takeover toggles", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("codex")).toBeInTheDocument();
+      expect(screen.getByText(getAppLabel("codex"))).toBeInTheDocument();
     });
 
     fireEvent.click(getPanelAppSwitch("codex"));
@@ -385,7 +386,7 @@ describe("Proxy takeover toggles", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("codex")).toBeInTheDocument();
+      expect(screen.getByText(getAppLabel("codex"))).toBeInTheDocument();
     });
 
     fireEvent.click(getPanelAppSwitch("codex"));
@@ -412,7 +413,7 @@ describe("Proxy takeover toggles", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText(appType)).toBeInTheDocument();
+        expect(screen.getByText(getAppLabel(appType))).toBeInTheDocument();
       });
 
       fireEvent.click(getPanelAppSwitch(appType));

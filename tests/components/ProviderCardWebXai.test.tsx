@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { ProviderCard } from "@/components/providers/ProviderCard";
 import type { Provider } from "@/types";
@@ -51,21 +52,27 @@ const baseProvider: Provider = {
   meta: { apiFormat: "openai_responses" },
 };
 
-const renderProvider = (provider: Provider) =>
-  render(
-    <ProviderCard
-      provider={provider}
-      isCurrent={false}
-      appId="codex"
-      onSwitch={vi.fn()}
-      onEdit={vi.fn()}
-      onDelete={vi.fn()}
-      onConfigureUsage={vi.fn()}
-      onOpenWebsite={vi.fn()}
-      onDuplicate={vi.fn()}
-      isProxyRunning={false}
-    />,
+const renderProvider = (provider: Provider) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <ProviderCard
+        provider={provider}
+        isCurrent={false}
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onConfigureUsage={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onDuplicate={vi.fn()}
+        isProxyRunning={false}
+      />
+    </QueryClientProvider>,
   );
+};
 
 describe("ProviderCard xAI WebUI actions", () => {
   it("hides all management and quota entry points for managed xAI OAuth data", () => {

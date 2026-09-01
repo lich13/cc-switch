@@ -867,8 +867,8 @@ requires_openai_auth = true
                 None,
             ),
         );
-        let mut official_provider = Provider::with_id(
-            "official-provider".to_string(),
+        let official_provider = Provider::with_id(
+            "codex-official".to_string(),
             "OpenAI Official".to_string(),
             json!({
                 "auth": {},
@@ -876,10 +876,9 @@ requires_openai_auth = true
             }),
             None,
         );
-        official_provider.category = Some("official".to_string());
         manager
             .providers
-            .insert("official-provider".to_string(), official_provider);
+            .insert("codex-official".to_string(), official_provider);
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
@@ -887,7 +886,7 @@ requires_openai_auth = true
 
     assert_codex_switch_route_only_updates_current(
         &state,
-        "official-provider",
+        "codex-official",
         Some("legacy-provider"),
         &before,
     );

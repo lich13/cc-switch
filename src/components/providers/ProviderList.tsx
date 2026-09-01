@@ -47,6 +47,10 @@ import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
+import { usePiCurrentState } from "@/lib/query/pi";
+import { isProxyAppId } from "@/config/appConfig";
+import { PROVIDER_TYPES } from "@/config/constants";
+import { isWebRuntime } from "@/lib/runtime";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -67,7 +71,7 @@ interface ProviderListProps {
   isProxyRunning?: boolean; // 代理服务运行状态
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
-  onSetAsDefault?: (provider: Provider) => void; // OpenClaw: set as default model
+  onSetAsDefault?: (provider: Provider, modelId?: string) => void; // OpenClaw: set as default model
   onToggleImageGenerationPolicy?: (
     provider: Provider,
     enabled: boolean,
@@ -151,14 +155,21 @@ export function ProviderList({
     [appId, openclawDefaultModel],
   );
 
-  // 故障转移相关
-  const { data: isAutoFailoverEnabled } = useAutoFailoverEnabled(appId);
-  const { data: failoverQueue } = useFailoverQueue(appId);
+  // Only apps with an explicit local-routing capability participate in
+  // failover. Additive apps such as Pi never query or render this state.
+  const supportsFailover = isProxyAppId(appId);
+  const { data: isAutoFailoverEnabled } = useAutoFailoverEnabled(
+    appId,
+    supportsFailover,
+  );
+  const { data: failoverQueue } = useFailoverQueue(appId, supportsFailover);
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
 
   const isFailoverModeActive =
-    isProxyTakeover === true && isAutoFailoverEnabled === true;
+    supportsFailover &&
+    isProxyTakeover === true &&
+    isAutoFailoverEnabled === true;
 
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);
@@ -197,12 +208,27 @@ export function ProviderList({
   const [searchTerm, setSearchTerm] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const isWeb = isWebRuntime();
   const { data: claudeDesktopStatus } = useQuery({
     queryKey: ["claudeDesktopStatus"],
     queryFn: () => providersApi.getClaudeDesktopStatus(),
     enabled: appId === "claude-desktop",
     refetchInterval: appId === "claude-desktop" ? 5000 : false,
   });
+  const {
+    data: piCurrentState,
+    isSuccess: isPiCurrentStateSuccess,
+    isError: isPiCurrentStateError,
+    error: piCurrentStateError,
+  } = usePiCurrentState(appId === "pi");
+  const isPiAuthoritativeStateReady = appId !== "pi" || isPiCurrentStateSuccess;
+  const isPiProviderInConfig = useCallback(
+    (provider: Provider): boolean => {
+      if (!isPiAuthoritativeStateReady) return false;
+      return piCurrentState?.enabledProviderIds.includes(provider.id) ?? false;
+    },
+    [isPiAuthoritativeStateReady, piCurrentState],
+  );
 
   // 连通性检查不发真实请求、无封号/计费风险，直接执行（无需确认弹窗）。
   const handleTest = useCallback(
@@ -288,16 +314,27 @@ export function ProviderList({
     }
   }, [isSearchOpen]);
 
+  const visibleProviders = useMemo(
+    () =>
+      isWeb
+        ? sortedProviders.filter(
+            (provider) =>
+              provider.meta?.providerType !== PROVIDER_TYPES.XAI_OAUTH,
+          )
+        : sortedProviders,
+    [isWeb, sortedProviders],
+  );
+
   const filteredProviders = useMemo(() => {
     const keyword = searchTerm.trim().toLowerCase();
-    if (!keyword) return sortedProviders;
-    return sortedProviders.filter((provider) => {
+    if (!keyword) return visibleProviders;
+    return visibleProviders.filter((provider) => {
       const fields = [provider.name, provider.notes, provider.websiteUrl];
       return fields.some((field) =>
         field?.toString().toLowerCase().includes(keyword),
       );
     });
-  }, [searchTerm, sortedProviders]);
+  }, [searchTerm, visibleProviders]);
 
   const claudeDesktopStatusMessages = useMemo(() => {
     if (appId !== "claude-desktop" || !claudeDesktopStatus) return [];
@@ -356,6 +393,30 @@ export function ProviderList({
     return messages;
   }, [appId, claudeDesktopStatus, t]);
 
+  const piStateErrorMessages = [
+    isPiCurrentStateError ? extractErrorMessage(piCurrentStateError) : "",
+  ].filter(Boolean);
+  const piStateErrorNotice =
+    appId === "pi" && piStateErrorMessages.length > 0 ? (
+      <div
+        role="alert"
+        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200"
+      >
+        <div className="flex items-center gap-2 font-medium">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          {t("pi.current.readFailed", {
+            defaultValue: "无法读取 Pi 当前配置",
+          })}
+        </div>
+        <p className="mt-1 text-xs leading-relaxed">
+          {t("pi.current.stateUnavailableHint")}
+          {piStateErrorMessages.length > 0
+            ? ` ${piStateErrorMessages.join(" · ")}`
+            : ""}
+        </p>
+      </div>
+    ) : null;
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -369,13 +430,16 @@ export function ProviderList({
     );
   }
 
-  if (sortedProviders.length === 0) {
+  if (visibleProviders.length === 0) {
     return (
-      <ProviderEmptyState
-        appId={appId}
-        onCreate={onCreate}
-        onImport={() => importMutation.mutate()}
-      />
+      <div className="mt-4 space-y-4">
+        {piStateErrorNotice}
+        <ProviderEmptyState
+          appId={appId}
+          onCreate={appId === "pi" ? undefined : onCreate}
+          onImport={appId === "pi" ? undefined : () => importMutation.mutate()}
+        />
+      </div>
     );
   }
 
@@ -398,21 +462,27 @@ export function ProviderList({
               isOmoSlim && provider.id === (currentOmoSlimId || "");
             const isHermesCurrent =
               appId === "hermes" && hermesCurrentProviderId === provider.id;
+            const isCurrent =
+              appId === "pi"
+                ? false
+                : isOmo
+                  ? isOmoCurrent
+                  : isOmoSlim
+                    ? isOmoSlimCurrent
+                    : appId === "hermes"
+                      ? isHermesCurrent
+                      : provider.id === currentProviderId;
             return (
               <SortableProviderCard
                 key={provider.id}
                 provider={provider}
-                isCurrent={
-                  isOmo
-                    ? isOmoCurrent
-                    : isOmoSlim
-                      ? isOmoSlimCurrent
-                      : appId === "hermes"
-                        ? isHermesCurrent
-                        : provider.id === currentProviderId
-                }
+                isCurrent={isCurrent}
                 appId={appId}
-                isInConfig={isProviderInConfig(provider.id)}
+                isInConfig={
+                  appId === "pi"
+                    ? isPiProviderInConfig(provider)
+                    : isProviderInConfig(provider.id)
+                }
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
                 onSwitch={onSwitch}
@@ -427,24 +497,42 @@ export function ProviderList({
                 onOpenTerminal={onOpenTerminal}
                 onTest={handleTest}
                 isTesting={isChecking(provider.id)}
-                isProxyRunning={isProxyRunning}
-                isProxyTakeover={isProxyTakeover}
+                isProxyRunning={supportsFailover && isProxyRunning}
+                isProxyTakeover={supportsFailover && isProxyTakeover}
                 isAutoFailoverEnabled={isFailoverModeActive}
                 failoverPriority={getFailoverPriority(provider.id)}
                 isInFailoverQueue={isInFailoverQueue(provider.id)}
-                onToggleFailover={(enabled) =>
-                  handleToggleFailover(provider.id, enabled)
+                onToggleFailover={
+                  supportsFailover
+                    ? (enabled) => handleToggleFailover(provider.id, enabled)
+                    : undefined
+                }
+                activeProviderId={
+                  supportsFailover ? activeProviderId : undefined
                 }
                 onToggleImageGenerationPolicy={onToggleImageGenerationPolicy}
-                activeProviderId={activeProviderId}
                 // OpenClaw: default model / Hermes: model.provider === provider.id
                 isDefaultModel={
                   appId === "hermes"
                     ? isHermesCurrent
                     : isProviderDefaultModel(provider.id)
                 }
+                isRemovalProtected={
+                  appId === "pi"
+                    ? false
+                    : appId === "hermes"
+                      ? isHermesCurrent
+                      : appId === "openclaw"
+                        ? isProviderDefaultModel(provider.id)
+                        : false
+                }
+                isStateChangeProtected={
+                  appId === "pi" && !isPiAuthoritativeStateReady
+                }
                 onSetAsDefault={
-                  onSetAsDefault ? () => onSetAsDefault(provider) : undefined
+                  onSetAsDefault
+                    ? (modelId) => onSetAsDefault(provider, modelId)
+                    : undefined
                 }
               />
             );
@@ -456,6 +544,7 @@ export function ProviderList({
 
   return (
     <div className="mt-4 space-y-4">
+      {piStateErrorNotice}
       {claudeDesktopStatusMessages.length > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
           <div className="flex items-center gap-2 font-medium">
@@ -572,11 +661,13 @@ interface SortableProviderCardProps {
   isAutoFailoverEnabled: boolean;
   failoverPriority?: number;
   isInFailoverQueue: boolean;
-  onToggleFailover: (enabled: boolean) => void;
+  onToggleFailover?: (enabled: boolean) => void;
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
-  onSetAsDefault?: () => void;
+  isRemovalProtected?: boolean;
+  isStateChangeProtected?: boolean;
+  onSetAsDefault?: (modelId?: string) => void;
   onToggleImageGenerationPolicy?: (
     provider: Provider,
     enabled: boolean,
@@ -610,6 +701,8 @@ function SortableProviderCard({
   onToggleFailover,
   activeProviderId,
   isDefaultModel,
+  isRemovalProtected,
+  isStateChangeProtected,
   onSetAsDefault,
   onToggleImageGenerationPolicy,
 }: SortableProviderCardProps) {
@@ -665,6 +758,8 @@ function SortableProviderCard({
         activeProviderId={activeProviderId}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
+        isRemovalProtected={isRemovalProtected}
+        isStateChangeProtected={isStateChangeProtected}
         onSetAsDefault={onSetAsDefault}
       />
     </div>

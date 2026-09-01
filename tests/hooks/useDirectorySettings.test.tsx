@@ -11,6 +11,7 @@ const homeDirMock = vi.hoisted(() => vi.fn<() => Promise<string>>());
 const joinMock = vi.hoisted(() =>
   vi.fn(async (...segments: string[]) => segments.join("/")),
 );
+const isWebRuntimeMock = vi.hoisted(() => vi.fn(() => false));
 const toastErrorMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
@@ -22,8 +23,9 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-vi.mock("@tauri-apps/api/path", () => ({
+vi.mock("@/lib/runtime", () => ({
   homeDir: homeDirMock,
+  isWebRuntime: isWebRuntimeMock,
   join: joinMock,
 }));
 
@@ -58,6 +60,7 @@ describe("useDirectorySettings", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isWebRuntimeMock.mockReturnValue(false);
 
     homeDirMock.mockResolvedValue("/home/mock");
     joinMock.mockImplementation(async (...segments: string[]) =>
@@ -72,9 +75,25 @@ describe("useDirectorySettings", () => {
       if (app === "grokbuild") return "/remote/grok";
       if (app === "opencode") return "/remote/opencode";
       if (app === "openclaw") return "/remote/openclaw";
+      if (app === "pi") return "/remote/pi";
       return "/remote/hermes";
     });
     selectConfigDirectoryMock.mockReset();
+  });
+
+  it("does not access host directories in web runtime", async () => {
+    isWebRuntimeMock.mockReturnValue(true);
+
+    const { result } = renderHook(() =>
+      useDirectorySettings({ settings: createSettings(), onUpdateSettings }),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(getAppConfigDirOverrideMock).not.toHaveBeenCalled();
+    expect(getConfigDirMock).not.toHaveBeenCalled();
+    expect(homeDirMock).not.toHaveBeenCalled();
+    expect(joinMock).not.toHaveBeenCalled();
   });
 
   it("initializes directories using overrides and remote defaults", async () => {
@@ -96,6 +115,7 @@ describe("useDirectorySettings", () => {
       opencode: "/remote/opencode",
       openclaw: "/remote/openclaw",
       hermes: "/remote/hermes",
+      pi: "/remote/pi",
     });
   });
 

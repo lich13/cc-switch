@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub(crate) struct ManagedAuthManagers {
     pub copilot: Arc<RwLock<CopilotAuthManager>>,
-    pub codex_oauth: Arc<RwLock<CodexOAuthManager>>,
+    pub codex_oauth: Arc<CodexOAuthManager>,
 }
 
 impl ManagedAuthManagers {
@@ -20,7 +20,7 @@ impl ManagedAuthManagers {
     pub(crate) fn new(data_dir: PathBuf) -> Self {
         Self {
             copilot: Arc::new(RwLock::new(CopilotAuthManager::new(data_dir.clone()))),
-            codex_oauth: Arc::new(RwLock::new(CodexOAuthManager::new(data_dir))),
+            codex_oauth: Arc::new(CodexOAuthManager::new(data_dir)),
         }
     }
 }

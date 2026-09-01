@@ -1,8 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { ProviderCard } from "@/components/providers/ProviderCard";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
+import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("@/lib/query/failover", () => ({
   useProviderHealth: () => ({ data: null }),
@@ -54,20 +56,23 @@ function renderCard(
   onToggleImageGenerationPolicy = vi.fn(),
   appId: AppId = "codex",
 ) {
+  const queryClient = createTestQueryClient();
   render(
-    <ProviderCard
-      provider={provider}
-      isCurrent={false}
-      appId={appId}
-      onSwitch={vi.fn()}
-      onEdit={vi.fn()}
-      onDelete={vi.fn()}
-      onConfigureUsage={vi.fn()}
-      onOpenWebsite={vi.fn()}
-      onDuplicate={vi.fn()}
-      isProxyRunning={true}
-      onToggleImageGenerationPolicy={onToggleImageGenerationPolicy}
-    />,
+    <QueryClientProvider client={queryClient}>
+      <ProviderCard
+        provider={provider}
+        isCurrent={false}
+        appId={appId}
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onConfigureUsage={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onDuplicate={vi.fn()}
+        isProxyRunning={true}
+        onToggleImageGenerationPolicy={onToggleImageGenerationPolicy}
+      />
+    </QueryClientProvider>,
   );
 
   return { onToggleImageGenerationPolicy };

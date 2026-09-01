@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch-webd"
-version = "3.19.2"
+version = "3.20.1"
 description = "Headless WebUI daemon for CC Switch"
 authors = ["Jason Young"]
 license = "MIT"
